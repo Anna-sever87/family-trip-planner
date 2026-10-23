@@ -1,0 +1,245 @@
+{
+  "version": 1,
+  "regions": [
+    {
+      "aliases": [
+        "Байкал",
+        "Байкал, Россия",
+        "озеро Байкал",
+        "озеро Байкал, Россия"
+      ],
+      "places": [
+        {
+          "title": "Байкальский музей",
+          "place_query": "Байкальский музей, Листвянка, Россия",
+          "locality": "Листвянка",
+          "source_url": "https://bm.isc.irk.ru/"
+        },
+        {
+          "title": "Камень Черского",
+          "place_query": "Камень Черского, Листвянка, Россия",
+          "locality": "Листвянка",
+          "source_url": "https://baikal-1.ru/tourism/routes-and-maps/"
+        },
+        {
+          "title": "Иркутский архитектурно-этнографический музей «Тальцы»",
+          "place_query": "Иркутский архитектурно-этнографический музей «Тальцы», Тальцы, Россия",
+          "locality": "Тальцы",
+          "source_url": "https://talci-irkutsk.ru/"
+        },
+        {
+          "title": "Свято-Никольская церковь",
+          "place_query": "Свято-Никольская церковь, Листвянка, Россия",
+          "locality": "Листвянка",
+          "source_url": "https://nikola.ircenter.ru/ru/history/"
+        },
+        {
+          "title": "Ретро-парк",
+          "place_query": "Ретро-парк, Листвянка, Россия",
+          "locality": "Листвянка",
+          "source_url": "https://retropark38.taplink.ws/"
+        },
+        {
+          "title": "Байкальская астрофизическая обсерватория",
+          "place_query": "Байкальская астрофизическая обсерватория, Листвянка, Россия",
+          "locality": "Листвянка",
+          "source_url": "https://ru.iszf.irk.ru/Организация_экскурсий"
+        },
+        {
+          "title": "Нерпинарий",
+          "place_query": "Нерпинарий, Листвянка, Россия",
+          "locality": "Листвянка",
+          "source_url": "https://baikalnerpa.ru/novosti-nerpinariya"
+        },
+        {
+          "title": "Сухое озеро",
+          "place_query": "Сухое озеро, Большое Голоустное, Россия",
+          "locality": "Большое Голоустное",
+          "source_url": "https://baikal-1.ru/tourism/routes-and-maps/"
+        },
+        {
+          "title": "Гребешок",
+          "place_query": "Гребешок, Большое Голоустное, Россия",
+          "locality": "Большое Голоустное",
+          "source_url": "https://baikal-1.ru/tourism/routes-and-maps/"
+        },
+        {
+          "title": "Подкамень",
+          "place_query": "Подкамень, Большое Голоустное, Россия",
+          "locality": "Большое Голоустное",
+          "source_url": "https://baikal-1.ru/tourism/routes-and-maps/podkamen/"
+        },
+        {
+          "title": "Падь Щеглова",
+          "place_query": "Падь Щеглова, Тальцы, Россия",
+          "locality": "Тальцы",
+          "source_url": "https://baikal-1.ru/tourism/routes-and-maps/"
+        },
+        {
+          "title": "Усадьба Тюрюминых",
+          "place_query": "Усадьба Тюрюминых, Листвянка, Россия",
+          "locality": "Листвянка",
+          "source_url": "https://www.baikal-usadba.ru/"
+        },
+        {
+          "title": "Самоцветы Байкала",
+          "place_query": "Самоцветы Байкала, Слюдянка, Россия",
+          "locality": "Слюдянка",
+          "source_url": "https://www.gorod-sludyanka.ru/page/dcdc81dae64f472cad6e4adbf6c19705"
+        },
+        {
+          "title": "Историко-минералогический музей",
+          "place_query": "Историко-минералогический музей, Слюдянка, Россия",
+          "locality": "Слюдянка",
+          "source_url": "https://www.sludyanka.ru/page/sludyanka_rubrics-6256"
+        },
+        {
+          "title": "Краеведческий музей имени Ренаты Яковец",
+          "place_query": "Краеведческий музей имени Ренаты Яковец, Слюдянка, Россия",
+          "locality": "Слюдянка",
+          "source_url": "https://www.sludyanka.ru/page/sludyanka_rubrics-6553"
+        },
+        {
+          "title": "Музей «Древности Байкала»",
+          "place_query": "Музей «Древности Байкала», Слюдянка, Россия",
+          "locality": "Слюдянка",
+          "source_url": "https://www.sludyanka.ru/page/sludyanka_rubrics-6696"
+        },
+        {
+          "title": "Музей истории Восточно-Сибирской железной дороги",
+          "place_query": "Музей истории Восточно-Сибирской железной дороги, Слюдянка, Россия",
+          "locality": "Слюдянка",
+          "source_url": "https://www.sludyanka.ru/page/sludyanka_rubrics-6028"
+        },
+        {
+          "title": "Шаманский мыс",
+          "place_query": "Шаманский мыс, Слюдянка, Россия",
+          "locality": "Слюдянка",
+          "source_url": "https://www.gorod-sludyanka.ru/page/rubrics-914"
+        },
+        {
+          "title": "Визит-центр «Байкал заповедный»",
+          "place_query": "Визит-центр «Байкал заповедный», Танхой, Россия",
+          "locality": "Танхой",
+          "source_url": "https://baikalecotourism.ru/baikalreserved"
+        },
+        {
+          "title": "Мелодия рассвета",
+          "place_query": "Мелодия рассвета, Танхой, Россия",
+          "locality": "Танхой",
+          "source_url": "https://baikalecotourism.ru/avenue"
+        }
+      ]
+    },
+    {
+      "aliases": [
+        "Магадан",
+        "Магадан, Россия",
+        "Магадан, Магаданская область",
+        "Магадан, Магаданская область, Россия"
+      ],
+      "places": [
+        {
+          "title": "Магаданский областной краеведческий музей",
+          "place_query": "Магаданский областной краеведческий музей, Магадан, Россия",
+          "locality": "Магадан",
+          "source_url": "https://magadanmuseum.ru/"
+        },
+        {
+          "title": "Мемориальный музей-квартира В.А. Козина",
+          "place_query": "Мемориальный музей-квартира В.А. Козина, Магадан, Россия",
+          "locality": "Магадан",
+          "source_url": "https://visitkolyma.ru/sights/muzey-kvartira-v-a-kozina/"
+        },
+        {
+          "title": "Музей «Галерея боевой славы»",
+          "place_query": "Музей «Галерея боевой славы», Магадан, Россия",
+          "locality": "Магадан",
+          "source_url": "https://www.culture.ru/institutes/97246/muzei-galereya-boevoi-slavy"
+        },
+        {
+          "title": "Городской парк",
+          "place_query": "Городской парк, Магадан, Россия",
+          "locality": "Магадан",
+          "source_url": "https://parkmagadan.ru/"
+        },
+        {
+          "title": "Парк «Маяк»",
+          "place_query": "Парк «Маяк», Магадан, Россия",
+          "locality": "Магадан",
+          "source_url": "https://visitkolyma.ru/sights/park-mayak/"
+        },
+        {
+          "title": "Свято-Троицкий кафедральный собор",
+          "place_query": "Свято-Троицкий кафедральный собор, Магадан, Россия",
+          "locality": "Магадан",
+          "source_url": "https://magadan-1.cerkov.ru/"
+        }
+      ]
+    },
+    {
+      "aliases": [
+        "Нячанг",
+        "Нячанг, Вьетнам",
+        "Нячанг, Кханьхоа, Вьетнам",
+        "Nha Trang",
+        "Nha Trang, Vietnam",
+        "Nha Trang, Việt Nam",
+        "Nha Trang, Khánh Hòa, Vietnam"
+      ],
+      "places": [
+        {
+          "title": "Bảo tàng Hải dương học Nha Trang",
+          "place_query": "Bảo tàng Hải dương học Nha Trang, Nha Trang, Vietnam",
+          "locality": "Nha Trang",
+          "source_url": "https://www.openstreetmap.org/relation/15662995"
+        },
+        {
+          "title": "Bảo tàng Alexandre Yersin",
+          "place_query": "Bảo tàng Alexandre Yersin, Nha Trang, Vietnam",
+          "locality": "Nha Trang",
+          "source_url": "https://nhatrang.khanhhoa.gov.vn/tin-bai/diem-den/bao-tang-alexandre-yersin-nha-trang-1625"
+        },
+        {
+          "title": "Bảo tàng Khánh Hòa",
+          "place_query": "Bảo tàng Khánh Hòa, Nha Trang, Vietnam",
+          "locality": "Nha Trang",
+          "source_url": "https://nhatrang.khanhhoa.gov.vn/tin-bai/diem-den/bao-tang-khanh-hoa-1622"
+        }
+      ]
+    },
+    {
+      "aliases": [
+        "Кемер, Анталья, Турция",
+        "Kemer, Antalya, Türkiye",
+        "Kemer, Antalya, Turkey"
+      ],
+      "places": [
+        {
+          "title": "Phaselis",
+          "place_query": "Phaselis, Tekirova, Türkiye",
+          "locality": "Tekirova",
+          "source_url": "https://www.muze.gov.tr/muze-detay?DistId=PHS&SectionId=PHS01"
+        },
+        {
+          "title": "Folklorik Yörük Parkı",
+          "place_query": "Folklorik Yörük Parkı, Kemer, Türkiye",
+          "locality": "Kemer",
+          "source_url": "https://www.kemer.bel.tr/tr/haberler/kemer-turizmcileri-agirladi.html"
+        },
+        {
+          "title": "Olbia",
+          "place_query": "Olbia, Kemer, Türkiye",
+          "locality": "Kemer",
+          "source_url": "https://www.kemer.bel.tr/tr/haberler/mustafa-ertugrul-aker-parki-sil-bastan-yapildi.html"
+        },
+        {
+          "title": "Ayışığı Parkı",
+          "place_query": "Ayışığı Parkı, Kemer, Türkiye",
+          "locality": "Kemer",
+          "source_url": "https://www.kemer.bel.tr/tr/tarihcemiz"
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,49 @@
+{
+  "version": 1,
+  "places": [
+    {
+      "title": "Историко-минералогический музей",
+      "place_queries": ["Историко-минералогический музей, Слюдянка, Россия"],
+      "lat": 51.653934,
+      "lon": 103.726181,
+      "address": {
+        "road": "улица Бабушкина",
+        "house_number": "20",
+        "city": "Слюдянка",
+        "county": "Слюдянский район",
+        "state": "Иркутская область",
+        "country": "Россия",
+        "country_code": "ru"
+      },
+      "type": "museum",
+      "provider": "2gis",
+      "provider_id": "70000001044533663",
+      "source_url": "https://2gis.ru/slyudyanka/firm/70000001044533663",
+      "official_url": "https://map-irkppk.ru/",
+      "official_link_url": "https://go.2gis.com/7xef2",
+      "checked_at": "2026-10-21"
+    },
+    {
+      "title": "Музей истории Восточно-Сибирской железной дороги",
+      "place_queries": ["Музей истории Восточно-Сибирской железной дороги, Слюдянка, Россия"],
+      "lat": 51.654642,
+      "lon": 103.726667,
+      "address": {
+        "road": "Железнодорожная улица",
+        "house_number": "22",
+        "city": "Слюдянка",
+        "county": "Слюдянский район",
+        "state": "Иркутская область",
+        "country": "Россия",
+        "country_code": "ru"
+      },
+      "type": "museum",
+      "provider": "2gis",
+      "provider_id": "70000001044536450",
+      "source_url": "https://2gis.ru/slyudyanka/firm/70000001044536450",
+      "official_url": "https://map-irkppk.ru/",
+      "official_link_url": "https://go.2gis.com/9sgW0",
+      "checked_at": "2026-10-21"
+    }
+  ]
+}

@@ -1,0 +1,724 @@
+"""Offline city-first pool: real identity rules, mocked completion/HTTP only."""
+
+from contextlib import nullcontext
+from copy import deepcopy
+from dataclasses import asdict
+from datetime import date
+import json
+import re
+import socket
+import sqlite3
+from types import SimpleNamespace
+import unittest
+from unittest.mock import Mock, patch
+
+import httpx
+
+import city_candidates as candidates
+import destination_name_hints as name_hints
+import places
+import verified_map_places
+from schemas import Itinerary, ItineraryDay, ItineraryItem, TripRequest
+
+
+TITLE = "Музей тестовых ремёсел"
+AREA = "Тестовый город"
+CENTER = {"lat": 52.0, "lon": 105.0, "name": AREA, "country_code": "RU", "admin1": "Тестовая область"}
+
+
+def request(days=1, **changes):
+    values = dict(destination=f"{AREA}, Россия", start_date="2099-10-01", end_date=f"2099-10-{days:02d}",
+                  adults=2, children_ages=[5], budget=60_000, currency="RUB", interest_categories=["museums"])
+    values.update(changes)
+    return TripRequest(**values)
+
+
+def record(title=TITLE, identifier=123, **changes):
+    value = {
+        "lat": "52.02", "lon": "105.03", "display_name": f"{title}, {AREA}, Россия",
+        "namedetails": {"name": title}, "address": {"city": AREA, "country": "Россия", "country_code": "ru"},
+        "category": "tourism", "type": "museum", "osm_type": "node", "osm_id": identifier,
+    }
+    value.update(changes)
+    return value
+
+
+def cached(raw):
+    value = deepcopy(raw)
+    value["name"] = value.pop("display_name")
+    value["lat"], value["lon"] = float(value["lat"]), float(value["lon"])
+    return value
+
+
+def response(records):
+    value = Mock()
+    value.json.return_value = records
+    return value
+
+
+class CityCandidateTests(unittest.TestCase):
+    def setUp(self):
+        self.cache, self.independent = {}, []
+        self.patched(places, "_cache", new=self.cache)
+        self.patched(verified_map_places, "load_verified_map_places", side_effect=lambda: deepcopy(self.independent))
+        self.patched(places, "_save_cache", side_effect=AssertionError("No cache writes"))
+        self.patched(places, "geocode", side_effect=AssertionError("No legacy lookup"))
+        self.patched(places, "geocode_nearby_named", side_effect=AssertionError("No mutating nearby lookup"))
+        self.patched(places, "_search", side_effect=AssertionError("No uncounted lookup"))
+        self.patched(socket.socket, "connect", side_effect=AssertionError("No network"))
+        self.patched(socket, "getaddrinfo", side_effect=AssertionError("No DNS"))
+        self.patched(sqlite3, "connect", side_effect=AssertionError("No DB"))
+        self.gate = self.patched(places, "_wait_for_turn", side_effect=lambda: nullcontext())
+        self.get = self.patched(httpx, "get", return_value=response([record()]))
+        self.hints = self.patched(candidates, "destination_name_hints", return_value=[])
+        self.completion = Mock(return_value=SimpleNamespace(text=json.dumps({"titles": [TITLE]}), input_tokens=11, output_tokens=17))
+
+    def patched(self, owner, name, **kwargs):
+        handle = patch.object(owner, name, **kwargs)
+        self.addCleanup(handle.stop)
+        return handle.start()
+
+    def run_pool(self, titles=None, *, days=1, center=None, **changes):
+        if titles is not None:
+            self.completion.return_value.text = json.dumps({"titles": titles}, ensure_ascii=False)
+        return candidates.ground_city_candidates(request(days, **changes), CENTER if center is None else center,
+                                                 completion=self.completion)
+
+    def foreign_pool(self, titles, *, code="VN", days=1, provider_title=None, locality="Test City"):
+        center = {**CENTER, "name": "Test City", "country_code": code}
+        title = provider_title or titles[0]
+        self.get.return_value = response([record(title=title, display_name=f"{title}, {locality}, {code}",
+            address={"city": locality, "country": code, "country_code": code.lower()})])
+        return self.run_pool(titles, days=days, center=center, destination=f"Test City, {code}")
+
+    def test_vn_tr_schema_and_prompt_require_local_names_with_explicit_fourteen_cap(self):
+        for code, language in (("VN", "vi,en"), ("TR", "tr,en")):
+            with self.subTest(code=code):
+                self.foreign_pool([], code=code, days=14, provider_title="Test Museum")
+                call = self.completion.call_args
+                item_schema = call.kwargs["json_schema"]["properties"]["titles"]
+                self.assertEqual(item_schema["maxItems"], 14)
+                self.assertEqual(item_schema["items"]["pattern"], candidates._NON_CYRILLIC_PATTERN)
+                system = call.args[0][0]["content"]
+                context = json.loads(call.args[0][1]["content"])
+                self.assertIn("не больше 14 названий", system)
+                self.assertIn("не делай самодельную транслитерацию", system)
+                self.assertIn("не предполагай", system.casefold())
+                self.assertIn("пустой список", system)
+                self.assertEqual((context["max_titles"], context["map_languages"]), (14, language))
+        self.get.assert_not_called()
+
+    def test_unicode_local_and_other_original_names_are_not_ascii_restricted(self):
+        for code, title in (("VN", "Bảo tàng Thử Nghiệm"), ("VN", "Đường Ánh Sáng"),
+                            ("TR", "İlçe Şehir Müzesi"), ("TR", "Işık Doğa Müzesi"),
+                            ("VN", "展館數字 12")):
+            with self.subTest(code=code, title=title):
+                result = self.foreign_pool([title], code=code)
+                self.assertEqual(result.problems, [])
+                self.assertEqual(result.candidates[0].title, title)
+                pattern = self.completion.call_args.kwargs["json_schema"]["properties"]["titles"]["items"]["pattern"]
+                self.assertIsNotNone(re.fullmatch(pattern, title))
+                params = self.get.call_args.kwargs["params"]
+                self.assertEqual(params["accept-language"], "vi,en" if code == "VN" else "tr,en")
+                self.assertEqual(params["countrycodes"], code.lower())
+
+    def test_translated_or_mixed_russian_proposals_are_rejected_without_losing_local_name(self):
+        title = "Bảo tàng Thử Nghiệm"
+        for code in ("VN", "TR"):
+            self.get.reset_mock()
+            result = self.foreign_pool(["Музей океанографии", title, "Парк Testland"], code=code,
+                                       provider_title=title)
+            with self.subTest(code=code):
+                self.assertEqual(result.problems, [])
+                self.assertEqual([item.title for item in result.candidates], [title])
+                self.assertEqual((result.map_requests, self.get.call_count), (1, 1))
+                self.assertEqual([item["reason"] for item in result.rejected],
+                                 ["nonlocal_cyrillic_proposal", "nonlocal_cyrillic_proposal"])
+                pattern = self.completion.call_args.kwargs["json_schema"]["properties"]["titles"]["items"]["pattern"]
+                self.assertIsNone(re.fullmatch(pattern, "Парк Testland"))
+
+    def test_vn_russian_only_does_not_trigger_transliteration_or_alternative_search(self):
+        result = self.foreign_pool(["Музей океанографии Нячанга", "Зоопарк в Нячанге"])
+        self.assertTrue(result.problems)
+        self.assertEqual(result.candidates, [])
+        self.assertEqual((result.usage["completion_calls"], result.map_requests), (1, 0))
+        self.get.assert_not_called()
+
+    def test_local_policy_does_not_change_other_countries_or_force_all_foreign_names_to_latin(self):
+        for code in ("RU", "BY", "KZ", "KG"):
+            with self.subTest(code=code):
+                result = self.foreign_pool([TITLE], code=code, days=7)
+                self.assertEqual(len(result.candidates), 1)
+                schema = self.completion.call_args.kwargs["json_schema"]["properties"]["titles"]
+                self.assertEqual(schema["maxItems"], 18)
+                self.assertNotIn("pattern", schema["items"])
+                self.assertEqual(self.get.call_args.kwargs["params"]["accept-language"], "ru")
+
+    def test_local_max_titles_rejects_excess_before_map_and_has_at_most_28_sends(self):
+        center = {**CENTER, "name": "Test City", "country_code": "VN"}
+        self.get.side_effect = httpx.ConnectTimeout("offline")
+        result = self.run_pool([f"Test Museum {number}" for number in range(15)], days=7,
+                               center=center, destination="Test City, VN")
+        self.assertTrue(result.problems)
+        self.assertEqual(result.map_requests, 0)
+        self.get.assert_not_called()
+        result = self.run_pool([f"Test Museum {number}" for number in range(14)], days=7,
+                               center=center, destination="Test City, VN")
+        self.assertEqual((result.map_requests, self.get.call_count, self.gate.call_count), (28, 28, 28))
+
+    def test_single_leading_period_is_proposal_only_normalized_and_deduplicated(self):
+        title = "Pagoda Testland"
+        result = self.foreign_pool([f".{title}", title], provider_title=title)
+        self.assertEqual(result.problems, [])
+        self.assertEqual(result.map_requests, 1)
+        self.assertEqual(self.get.call_args.kwargs["params"]["q"], f"{title}, VN")
+        self.assertEqual(result.normalized_proposals, [
+            {"original_title": f".{title}", "title": title, "reason": "single_leading_period"}])
+        diagnostic = asdict(result)
+        self.assertEqual(diagnostic["normalized_proposals"], result.normalized_proposals)
+        json.dumps(diagnostic, ensure_ascii=False, allow_nan=False)
+
+    def test_single_period_with_space_is_allowed_but_ellipsis_is_not_repeatedly_stripped(self):
+        result = self.foreign_pool([". Test Museum"], provider_title="Test Museum")
+        self.assertEqual(result.candidates[0].title, "Test Museum")
+        self.get.reset_mock()
+        result = self.foreign_pool(["..Test Museum", ". .Test Museum", "."], provider_title="Test Museum")
+        self.assertEqual(result.map_requests, 0)
+        self.assertEqual(result.normalized_proposals, [])
+        self.assertTrue(all(item["reason"] == "unsupported_leading_punctuation" for item in result.rejected))
+        self.get.assert_not_called()
+
+    def test_provider_canonical_name_and_actual_locality_are_never_rewritten(self):
+        title = ".Test Museum"
+        locality = "Phường Thử Nghiệm"
+        result = self.foreign_pool([title], provider_title=title, locality=locality)
+        self.assertEqual(result.problems, [])
+        item = result.candidates[0]
+        self.assertEqual(item.title, title)
+        self.assertEqual(item.area, locality)
+        self.assertEqual(item.place_query, f"{title}, {locality}, VN")
+        self.assertEqual(item.record["name"], f"{title}, {locality}, VN")
+        self.assertEqual(self.get.call_args.kwargs["params"]["q"], "Test Museum, VN")
+
+    def test_local_spelling_does_not_allow_mismatching_other_entity_or_country(self):
+        center = {**CENTER, "name": "Test City", "country_code": "VN"}
+        for provider_name, country in (("Entirely Different Museum", "vn"), ("Test Museum", "tr")):
+            self.get.reset_mock()
+            self.get.return_value = response([record(title=provider_name,
+                display_name=f"{provider_name}, Test City, {country.upper()}",
+                address={"city": "Test City", "country": country.upper(), "country_code": country})])
+            result = self.run_pool(["Test Museum"], center=center, destination="Test City, VN")
+            with self.subTest(provider_name=provider_name, country=country):
+                self.assertFalse(result.candidates)
+                self.assertEqual((result.map_requests, self.get.call_count), (1, 1))
+
+    def test_descriptive_zoo_is_not_a_named_candidate_but_specific_names_survive(self):
+        result = self.foreign_pool(["Zoo in Test City"], provider_title="Zoo in Test City")
+        self.assertEqual(result.map_requests, 0)
+        self.assertEqual(result.rejected[0]["reason"], "generic_name_or_non_visit")
+        self.get.assert_not_called()
+        for title in ("Testland Zoo", "Museum X", "St. Test Museum"):
+            with self.subTest(title=title):
+                result = self.foreign_pool([title])
+                self.assertEqual(result.problems, [])
+                self.assertEqual(result.candidates[0].title, title)
+                self.assertEqual(result.normalized_proposals, [])
+
+    def test_source_names_use_exact_alias_only_and_do_not_match_unknown_city(self):
+        self.hints.side_effect = name_hints.destination_name_hints
+        catalogue = {"version": 1, "regions": [{"aliases": [f"{AREA}, Россия"], "places": [{
+            "title": TITLE, "place_query": f"{TITLE}, {AREA}, Россия", "locality": AREA,
+            "source_url": "https://example.invalid/official-name",
+        }]}]}
+        source_file = Mock()
+        source_file.read_text.return_value = json.dumps(catalogue)
+        with patch.object(name_hints, "NAME_HINTS_FILE", source_file):
+            for destination, city, expected in ((f"{AREA}, Россия", AREA, 1),
+                                               (f"{AREA.lower()}, россия", AREA, 1),
+                                               (f"Другой {AREA}, Россия", f"Другой {AREA}", 0)):
+                self.get.reset_mock()
+                result = self.run_pool([], destination=destination, center={**CENTER, "name": city})
+                context = json.loads(self.completion.call_args.args[0][1]["content"])
+                with self.subTest(destination=destination):
+                    self.assertEqual(len(context["source_name_hints"]), expected)
+                    self.assertEqual(self.get.call_count, expected)
+                    self.assertEqual(len(result.candidates), expected)
+                    self.hints.assert_called_with(destination, limit=6)
+
+    def test_source_names_are_seed_first_deduplicated_and_still_require_map(self):
+        seed = {"title": TITLE, "source_url": "https://example.invalid/official-name",
+                "lat": 99, "indoor": True, "cost": 0, "place_query": "Do not copy this query"}
+        self.hints.return_value = [seed, dict(seed)]
+        other = "Музей иных ремёсел"
+        self.get.side_effect = [response([record()]), response([record(other, identifier=456)])]
+        result = self.run_pool([f".{TITLE}", other])
+        self.assertEqual([item.title for item in result.candidates], [TITLE, other])
+        self.assertEqual([call.kwargs["params"]["q"] for call in self.get.call_args_list],
+                         [f"{TITLE}, Россия", f"{other}, Россия"])
+        context = json.loads(self.completion.call_args.args[0][1]["content"])
+        self.assertTrue(all(set(hint) == {"title", "source_url"} for hint in context["source_name_hints"]))
+        self.assertIn("не VisitFacts", self.completion.call_args.args[0][0]["content"])
+        self.assertIn("не копируй их в titles", self.completion.call_args.args[0][0]["content"])
+        self.assertIn("дополнительные", self.completion.call_args.args[0][0]["content"])
+        for item in result.candidates:
+            self.assertNotIn("indoor", item.record)
+            self.assertNotIn("cost", item.record)
+            self.assertNotIn("source_url", item.record)
+        self.get.side_effect = None
+        self.get.return_value = response([])
+        self.assertFalse(self.run_pool([]).candidates)
+
+    def test_source_names_do_not_bypass_country_radius_type_or_identity(self):
+        self.hints.return_value = [{"title": TITLE, "source_url": "https://example.invalid/name"}]
+        for raw in (record(title="Другой музей"), record(lat="55"), record(type="hotel"),
+                    record(address={"city": AREA, "country": "TR", "country_code": "tr"})):
+            with self.subTest(raw=raw):
+                self.get.return_value = response([raw])
+                self.assertFalse(self.run_pool([]).candidates)
+        self.hints.return_value = [{"title": "Городской парк", "source_url": "https://example.invalid/name"}]
+        self.get.reset_mock()
+        self.assertFalse(self.run_pool([]).candidates)
+        self.assertEqual(self.get.call_count, 1)  # No source-name bypass of the ordinary map check.
+
+    def test_seed_plus_ai_total_name_and_http_caps_remain_unchanged(self):
+        for days, code, limit in ((1, "RU", 6), (7, "RU", 18), (7, "VN", 14), (7, "TR", 14)):
+            with self.subTest(days=days, code=code):
+                self.get.reset_mock()
+                self.gate.reset_mock()
+                self.get.side_effect = httpx.ConnectTimeout("offline")
+                seeds = [f"Seed Museum {number}" for number in range(3)]
+                self.hints.return_value = [{"title": title, "source_url": "https://example.invalid/name"}
+                                          for title in seeds]
+                ai_names = [seeds[0]] + [f"Model Museum {number}" for number in range(limit - 1)]
+                center = {**CENTER, "name": "Test City", "country_code": code}
+                result = self.run_pool(ai_names, days=days, center=center, destination=f"Test City, {code}")
+                self.assertEqual(result.map_requests, 2 * limit)
+                self.assertEqual(self.get.call_count, 2 * limit)
+                self.assertEqual(self.gate.call_count, 2 * limit)
+                queries = [call.kwargs["params"]["q"] for call in self.get.call_args_list[::2]]
+                self.assertEqual(queries[:3], [f"{title}, {code}" for title in seeds])
+                self.assertEqual(len(set(queries)), limit)
+                self.hints.assert_called_with(f"Test City, {code}", limit=limit)
+
+    def test_peak_record_cannot_become_city_visit_from_fresh_or_cached_map(self):
+        title = "Test Mountain"
+        peak = record(title, category="natural", type="peak")
+        self.assertTrue(candidates._eligible_poi_type(cached(peak)))  # Regional policy is unchanged.
+        for use_cache in (False, True):
+            with self.subTest(use_cache=use_cache):
+                self.cache.clear()
+                if use_cache:
+                    self.cache[f"{title}, {AREA}, Россия".lower()] = cached(peak)
+                    self.cache[next(iter(self.cache))].update(cost=0, indoor=False, duration_min=180,
+                                                              access="yes", cableway="invented")
+                before = deepcopy(self.cache)
+                self.get.return_value = response([peak])
+                result = self.run_pool([title])
+                self.assertFalse(result.candidates)
+                self.assertTrue(result.problems)
+                self.assertEqual(result.map_requests, 1)
+                self.assertEqual(self.cache, before)
+        system = self.completion.call_args.args[0][0]["content"]
+        self.assertIn("Координата вершины/острова не доказывает доступ", system)
+
+    def test_peak_guard_does_not_infer_type_from_name_or_relabel_museum(self):
+        title = "Test Mountain Museum"
+        self.get.return_value = response([record(title, type="museum")])
+        result = self.run_pool([title])
+        self.assertEqual(result.problems, [])
+        self.assertEqual(result.candidates[0].record["type"], "museum")
+        self.assertEqual(result.candidates[0].title, title)
+
+    def test_one_completion_named_bounded_search_and_canonical_record(self):
+        result = self.run_pool()
+        self.assertEqual(result.problems, [])
+        self.assertEqual(result.usage, {"completion_calls": 1, "input_tokens": 11, "output_tokens": 17})
+        self.completion.assert_called_once()
+        self.assertEqual(result.map_requests, 1)
+        self.assertEqual(self.gate.call_count, 1)
+        params = self.get.call_args.kwargs["params"]
+        self.assertEqual((params["q"], params["countrycodes"], params["bounded"]), (f"{TITLE}, Россия", "ru", 1))
+        west, north, east, south = map(float, params["viewbox"].split(","))
+        self.assertLess(west, CENTER["lon"])
+        self.assertGreater(east, CENTER["lon"])
+        self.assertAlmostEqual(places.distance_km(CENTER["lat"], CENTER["lon"], north, CENTER["lon"]), 40, places=6)
+        item = result.candidates[0]
+        self.assertEqual((item.candidate_id, item.title, item.area), ("osm-node-123", TITLE, AREA))
+        self.assertEqual(item.place_query, f"{TITLE}, {AREA}, Россия")
+        self.assertIs(type(item.record["lat"]), float)
+        self.assertNotIn("indoor", item.record)
+        self.assertEqual(self.cache, {})
+
+    def test_names_only_schema_has_request_specific_cap(self):
+        for days, expected in ((1, 6), (4, 12), (7, 18), (14, 18)):
+            with self.subTest(days=days):
+                self.run_pool([], days=days)
+                schema = self.completion.call_args.kwargs["json_schema"]
+                self.assertEqual(set(schema["properties"]), {"titles"})
+                self.assertFalse(schema["additionalProperties"])
+                self.assertEqual(schema["properties"]["titles"]["maxItems"], expected)
+                self.assertEqual(schema["properties"]["titles"]["items"]["type"], "string")
+
+    def test_rainy_dates_reach_name_only_prompt_without_new_calls_or_facts(self):
+        result = candidates.ground_city_candidates(request(days=2), CENTER, completion=self.completion,
+                                                   rainy_dates=["2099-10-02", "2099-10-01"])
+        messages = self.completion.call_args.args[0]
+        context = json.loads(messages[1]["content"])
+        self.assertEqual(context["rainy_dates"], ["2099-10-01", "2099-10-02"])
+        self.assertIn("разных дождливых дат", messages[0]["content"])
+        self.assertIn("не подтверждают indoor", messages[0]["content"])
+        self.assertEqual((self.completion.call_count, result.map_requests), (1, 1))
+        self.assertEqual(set(self.completion.call_args.kwargs["json_schema"]["properties"]), {"titles"})
+        self.assertNotIn("indoor", result.candidates[0].record)
+
+    def test_invalid_rainy_dates_stop_before_completion_and_map(self):
+        for rainy_dates in (None, "2099-10-01", {"2099-10-01"}, [True], ["20991001"],
+                            ["2099-10-01T00:00:00"], ["2099-09-30"], ["2099-10-03"],
+                            ["2099-10-01", "2099-10-01"], ["2099-10-01"] * 3):
+            with self.subTest(rainy_dates=rainy_dates):
+                result = candidates.ground_city_candidates(request(days=2), CENTER,
+                    completion=self.completion, rainy_dates=rainy_dates)
+                self.assertTrue(result.problems)
+                self.assertEqual((result.usage["completion_calls"], result.map_requests), (0, 0))
+        self.completion.assert_not_called()
+        self.get.assert_not_called()
+
+    def test_default_empty_rainy_dates_keep_single_names_completion(self):
+        result = self.run_pool()
+        self.assertEqual(json.loads(self.completion.call_args.args[0][1]["content"])["rainy_dates"], [])
+        self.assertEqual((self.completion.call_count, result.map_requests), (1, 1))
+
+    def test_invalid_json_unknown_fields_nonfinite_and_excess_names_fail_before_map(self):
+        for text in ("bad", '{"titles": [], "titles": []}', '{"titles": [NaN]}',
+                     '{"titles": [], "indoor": true}', '{"titles": [true]}',
+                     json.dumps({"titles": ["Музей " + str(i) for i in range(7)]}),
+                     json.dumps({"titles": ["Музей, город"]}), json.dumps({"titles": ["Музей\nтест"]})):
+            with self.subTest(text=text):
+                self.completion.return_value.text = text
+                result = self.run_pool()
+                self.assertTrue(result.problems)
+                self.assertEqual((result.map_requests, result.usage["completion_calls"]), (0, 1))
+        self.get.assert_not_called()
+
+    def test_completion_failure_is_not_retried(self):
+        self.completion.side_effect = RuntimeError("provider failure")
+        result = self.run_pool()
+        self.assertTrue(result.problems)
+        self.assertEqual(result.usage["completion_calls"], 1)
+        self.completion.assert_called_once()
+        self.get.assert_not_called()
+
+    def test_invalid_center_wrong_country_admin_or_region_stops_before_completion(self):
+        for center, changes in ((dict(CENTER, lat=True), {}), (dict(CENTER, lon=float("nan")), {}),
+                                (dict(CENTER, lat="52"), {}), (dict(CENTER, country_code=""), {}),
+                                (dict(CENTER, country_code="TR"), {}), (dict(CENTER, name="Другой город"), {}),
+                                (CENTER, {"destination_kind": "region"}),
+                                (CENTER, {"destination": f"{AREA}, Другая область, Россия"})):
+            with self.subTest(center=center, changes=changes):
+                result = self.run_pool(center=center, **changes)
+                self.assertTrue(result.problems)
+                self.assertEqual(result.usage["completion_calls"], 0)
+        self.completion.assert_not_called()
+        self.get.assert_not_called()
+
+    def test_country_alias_and_three_part_context_keep_confirmed_center(self):
+        result = self.run_pool(destination=f"{AREA}, Тестовая область, Russia")
+        self.assertFalse(result.problems)
+        self.assertEqual(result.candidates[0].place_query, f"{TITLE}, {AREA}, Россия")
+
+    def test_provider_alias_canonical_name_and_neighbour_locality_not_model_city(self):
+        official = "Музей северных ремёсел"
+        raw = record(title=official, namedetails={"name": official, "alt_name": TITLE},
+                     address={"town": "Соседний посёлок", "country": "Россия", "country_code": "ru"},
+                     display_name=f"{official}, Соседний посёлок, Россия")
+        self.get.return_value = response([raw])
+        item = self.run_pool().candidates[0]
+        self.assertEqual((item.title, item.area), (official, "Соседний посёлок"))
+        self.assertEqual(item.place_query, f"{official}, Соседний посёлок, Россия")
+
+    def test_explicit_short_and_full_park_forms_keep_provider_canonical_name(self):
+        for short, official in (("Парк Ривьера", "Парк культуры и отдыха Ривьера"),
+                                ("парк «Северный свет»", "Парк культуры и отдыха Северный свет"),
+                                ("Парк имени Гагарина", "Парк культуры и отдыха имени Гагарина"),
+                                ("Парк культуры и отдыха Лунный сад", "Парк Лунный сад")):
+            with self.subTest(short=short, official=official):
+                self.get.return_value = response([record(official, type="park")])
+                result = self.run_pool([short])
+                self.assertEqual(len(result.candidates), 1)
+                item = result.candidates[0]
+                self.assertEqual(item.title, official)
+                self.assertEqual(item.place_query, f"{official}, {AREA}, Россия")
+                self.assertEqual(item.record["namedetails"], {"name": official})
+                self.assertTrue(places._valid_record_only_place(item.place_query, item.record))
+                self.assertFalse(places._place_matches_query(f"{short}, Россия", item.record))
+                self.assertEqual(result.map_requests, 1)
+
+    def test_park_prefix_normalization_cannot_drop_identity_or_change_type(self):
+        cases = (
+            ("Парк Ривьера", "Парк культуры и отдыха Южная Ривьера", "park"),
+            ("Ривьера", "Парк культуры и отдыха Ривьера", "park"),
+            ("Парк Ривьера", "Парк культуры и отдыха Ривьера", "museum"),
+            ("Парк Ривьера", "Парк культуры и отдыха Ривьера", "artwork"),
+            ("Парк имени Гагарина", "Парк культуры и отдыха Гагарина", "park"),
+            ("Парк Ривьера", "Природный парк Ривьера", "park"),
+            ("Парк Северный свет", "Парк культуры и отдыха Свет Северный", "park"),
+            ("Парк", "Парк культуры и отдыха", "park"),
+            ("Парк имени", "Парк культуры и отдыха имени", "park"),
+        )
+        for proposal, official, kind in cases:
+            with self.subTest(proposal=proposal, official=official, kind=kind):
+                self.get.return_value = response([record(official, type=kind)])
+                result = self.run_pool([proposal])
+                self.assertFalse(result.candidates)
+                self.assertLessEqual(result.map_requests, 1)
+
+    def test_park_name_normalization_keeps_country_and_radius_guards(self):
+        official = "Парк культуры и отдыха Ривьера"
+        for changes in ({"address": {"city": AREA, "country": "Турция", "country_code": "tr"}},
+                        {"lat": "55"}, {"address": {"country": "Россия", "country_code": "ru"}}):
+            with self.subTest(changes=changes):
+                self.get.return_value = response([record(official, type="park", **changes)])
+                self.assertFalse(self.run_pool(["Парк Ривьера"]).candidates)
+
+    def test_wrong_name_country_type_identity_and_coordinates_are_not_confirmed(self):
+        bad_records = [
+            record(title="Другой музей"), record(address={"city": AREA, "country": "Россия", "country_code": "tr"}),
+            record(type="locality", category="place"), record(type="hotel"), record(osm_id=True),
+            record(osm_id="123"), record(osm_type="bad"), record(osm_id=None),
+            record(lat=True), record(lat="nan"), record(lon="inf"), record(lat="91"),
+            record(address={"state": "Тестовая область", "country": "Россия", "country_code": "ru"}),
+        ]
+        for raw in bad_records:
+            with self.subTest(raw=raw):
+                self.get.return_value = response([raw])
+                result = self.run_pool()
+                self.assertEqual(result.candidates, [])
+                self.assertEqual(result.map_requests, 1)
+                self.assertEqual(result.rejected[0]["reason"], "limited_search_unconfirmed")
+
+    def test_strict_circle_rejects_outside_40_even_inside_viewbox(self):
+        self.get.return_value = response([record(lat="52.3", lon="105.5")])
+        self.assertGreater(places.distance_km(52, 105, 52.3, 105.5), 40)
+        self.assertFalse(self.run_pool().candidates)
+        self.get.return_value = response([record(lat="52.35", lon="105")])
+        self.assertTrue(self.run_pool().candidates)
+
+    def test_unusable_first_result_does_not_hide_later_valid_identity(self):
+        self.get.return_value = response([record(osm_id=None), record(lat="55"), record(identifier=456)])
+        result = self.run_pool()
+        self.assertEqual(result.candidates[0].candidate_id, "osm-node-456")
+        self.assertEqual(result.map_requests, 1)
+
+    def test_cache_hit_has_zero_http_no_mutation_and_no_schedule_fact_injection(self):
+        query = f"{TITLE}, {AREA}, Россия"
+        self.cache[query.lower()] = cached(record())
+        self.cache[query.lower()].update(indoor=True, cost=100, duration_min=999, opening_hours="24/7")
+        before = deepcopy(self.cache)
+        result = self.run_pool()
+        self.assertEqual(result.map_requests, 0)
+        self.assertEqual(self.cache, before)
+        self.get.assert_not_called()
+        for key in ("indoor", "cost", "duration_min", "opening_hours"):
+            self.assertNotIn(key, result.candidates[0].record)
+        result.candidates[0].record["address"]["city"] = "Изменено"
+        self.assertEqual(self.cache, before)
+
+    def test_invalid_cache_key_or_missing_id_requires_real_lookup(self):
+        for key, raw in (("Другой музей, Россия", record()), (f"{TITLE}, {AREA}, Россия", record(osm_id=None))):
+            with self.subTest(key=key):
+                self.cache.clear()
+                self.cache[key.lower()] = cached(raw)
+                result = self.run_pool()
+                self.assertEqual(result.map_requests, 1)
+
+    def test_cached_provenance_must_pass_record_only_kernel_before_selection(self):
+        query = f"{TITLE}, {AREA}, Россия"
+        for changes in ({"source_url": "https://example.invalid/forged"}, {"provenance": "model"}):
+            with self.subTest(changes=changes):
+                self.cache.clear()
+                self.cache[query.lower()] = cached(record(**changes))
+                before = deepcopy(self.cache)
+                self.get.return_value = response([])
+                result = self.run_pool()
+                self.assertFalse(result.candidates)
+                self.assertEqual(result.map_requests, 1)
+                self.assertEqual(self.cache, before)
+
+    def test_actual_waterfall_artwork_record_is_not_a_natural_waterfall(self):
+        # Identity/type/address from the observed map record, no live lookup.
+        title = "Агурские водопады"
+        raw = record(title, 7342982234, lat="43.5475075", lon="39.811327", type="artwork",
+                     address={"suburb": "Малый Ахун", "county": "городской округ Сочи",
+                              "country": "Россия", "country_code": "ru"},
+                     display_name=f"{title}, Малый Ахун, городской округ Сочи, Россия")
+        self.get.return_value = response([raw])
+        result = self.run_pool([title], center={"lat": 43.6, "lon": 39.73, "name": "Сочи", "country_code": "RU"},
+                               destination="Сочи, Россия")
+        self.assertEqual(result.candidates, [])
+        self.assertEqual(result.map_requests, 1)
+        self.assertEqual(result.rejected[0]["reason"], "limited_search_unconfirmed")
+
+    def test_unlisted_waterfall_names_require_waterfall_type(self):
+        for title in ("Северные водопады", "Водопад Серебряный", "Каскад Звёздных водопадов",
+                      "Silver Waterfall", "Hidden Waterfalls"):
+            for kind in ("waterfall", "artwork", "locality", "museum", "attraction", "viewpoint", "park"):
+                with self.subTest(title=title, kind=kind):
+                    self.get.return_value = response([record(title, type=kind, category="waterway" if kind == "waterfall" else "tourism")])
+                    result = self.run_pool([title])
+                    self.assertEqual(bool(result.candidates), kind == "waterfall")
+                    self.assertEqual(result.map_requests, 1)
+
+    def test_explicit_museum_and_sculpture_prefixes_do_not_mean_waterfall(self):
+        for title, expected_type in (("Музей «Водопад»", "museum"), ("Museum Waterfalls", "museum"),
+                                     ("Скульптура «Водопад»", "artwork"), ("Sculpture Waterfall", "artwork")):
+            for kind in ("museum", "artwork", "waterfall"):
+                with self.subTest(title=title, kind=kind):
+                    self.get.return_value = response([record(title, type=kind)])
+                    result = self.run_pool([title])
+                    self.assertEqual(bool(result.candidates), kind == expected_type)
+
+    def test_non_waterfall_artwork_remains_eligible(self):
+        title = "Скульптура Северный ветер"
+        self.get.return_value = response([record(title, type="artwork")])
+        result = self.run_pool([title])
+        self.assertEqual(len(result.candidates), 1)
+        self.assertEqual(result.candidates[0].record["type"], "artwork")
+
+    def test_natural_waterfall_cache_reuses_valid_record_without_map_requests(self):
+        title = "Серебряный водопад"
+        query = f"{title}, {AREA}, Россия"
+        for category in ("waterway", "natural"):
+            with self.subTest(category=category):
+                self.cache.clear()
+                self.cache[query.lower()] = cached(record(title, type="waterfall", category=category))
+                before = deepcopy(self.cache)
+                result = self.run_pool([title])
+                self.assertEqual(len(result.candidates), 1)
+                self.assertEqual(result.map_requests, 0)
+                item = result.candidates[0]
+                self.assertTrue(places._valid_record_only_place(item.place_query, item.record))
+                self.assertEqual(self.cache, before)
+        self.get.assert_not_called()
+
+    def test_provider_alias_cannot_hide_explicit_natural_type_mismatch(self):
+        for proposal, official in (("Северный каскад", "Северные водопады"),
+                                   ("Северные водопады", "Северный каскад")):
+            with self.subTest(proposal=proposal, official=official):
+                self.get.return_value = response([record(official, type="artwork",
+                    namedetails={"name": official, "alt_name": proposal})])
+                self.assertFalse(self.run_pool([proposal]).candidates)
+
+    def test_same_id_alias_deduplicates_but_distinct_ids_at_same_coordinates_survive(self):
+        second, third = "Музей городского быта", "Музей современной истории"
+        first = record(namedetails={"name": TITLE, "alt_name": second})
+        self.get.side_effect = [response([first]), response([first]), response([record(third, 124)])]
+        result = self.run_pool([TITLE, second, third])
+        self.assertEqual([item.candidate_id for item in result.candidates], ["osm-node-123", "osm-node-124"])
+        self.assertEqual(result.map_requests, 3)
+
+    def test_duplicate_proposal_names_and_generic_labels_do_not_spend_queries(self):
+        result = self.run_pool([TITLE, TITLE.upper(), "Обед", "Отдых", "Музей", "Парк"])
+        self.assertEqual(result.map_requests, 1)
+        self.assertEqual(len(result.rejected), 4)
+        self.assertEqual(result.problems, [])
+
+    def test_network_retry_counts_actual_attempts_and_uses_shared_gate_each_time(self):
+        self.get.side_effect = [httpx.ConnectTimeout("offline"), response([record()])]
+        result = self.run_pool()
+        self.assertEqual((result.map_requests, self.get.call_count, self.gate.call_count), (2, 2, 2))
+        self.assertFalse(result.problems)
+        self.completion.assert_called_once()
+
+    def test_18_names_with_two_failures_each_are_bounded_to_36_actual_requests(self):
+        self.get.side_effect = httpx.ConnectTimeout("offline")
+        result = self.run_pool([f"Музей истории номер {index}" for index in range(18)], days=7)
+        self.assertEqual((result.map_requests, self.get.call_count, self.gate.call_count), (36, 36, 36))
+        self.assertEqual(len(result.rejected), 18)
+        self.assertTrue(result.problems)
+        self.completion.assert_called_once()
+
+    def test_clock_failure_has_zero_sends_no_retry(self):
+        self.gate.side_effect = places.GeocodeUnavailable("clock failed")
+        result = self.run_pool()
+        self.assertEqual(result.map_requests, 0)
+        self.get.assert_not_called()
+        self.assertEqual(result.rejected[0]["reason"], "shared_map_clock_unavailable")
+
+    def test_partial_rejection_does_not_make_sufficient_pool_fatal(self):
+        self.get.side_effect = [response([]), response([record()])]
+        result = self.run_pool(["Музей ненайденного объекта", TITLE])
+        self.assertEqual(len(result.candidates), 1)
+        self.assertEqual(len(result.rejected), 1)
+        self.assertFalse(result.problems)
+
+    def test_fewer_candidates_than_days_is_explicitly_insufficient(self):
+        result = self.run_pool(days=2)
+        self.assertEqual(len(result.candidates), 1)
+        self.assertTrue(result.problems)
+        self.assertIn("1 уникальных мест на 2 дней", result.problems[0])
+
+    def test_authorized_partial_pool_retains_positive_candidates_without_claiming_calendar(self):
+        result = candidates.ground_city_candidates(request(days=2), CENTER, completion=self.completion,
+                                                   allow_partial_program=True)
+        self.assertEqual(len(result.candidates), 1)
+        self.assertEqual(result.problems, [])
+        self.assertEqual((result.usage["completion_calls"], result.map_requests), (1, 1))
+        self.assertFalse(hasattr(result, "itinerary"))
+        self.assertFalse(hasattr(result, "program_report"))
+
+    def test_authorized_partial_pool_still_rejects_zero_candidates(self):
+        self.get.return_value = response([])
+        result = candidates.ground_city_candidates(request(days=2), CENTER, completion=self.completion,
+                                                   allow_partial_program=True)
+        self.assertEqual(result.candidates, [])
+        self.assertTrue(result.problems)
+        self.assertEqual((result.usage["completion_calls"], result.map_requests), (1, 1))
+
+    def test_partial_pool_permission_requires_exact_boolean(self):
+        for value in (1, 0, "true", None):
+            with self.subTest(value=value):
+                result = candidates.ground_city_candidates(request(days=2), CENTER, completion=self.completion,
+                                                           allow_partial_program=value)
+                self.assertTrue(result.problems)
+                self.assertEqual((result.usage["completion_calls"], result.map_requests), (0, 0))
+        self.completion.assert_not_called()
+        self.get.assert_not_called()
+
+    def test_current_independent_provider_uses_exact_catalogue_query(self):
+        raw = verified_map_places._record({
+            "title": TITLE, "place_queries": [f"{TITLE}, {AREA}, Россия"], "lat": 52.02, "lon": 105.03,
+            "address": {"city": AREA, "county": "Тестовый округ", "state": "Тестовая область",
+                        "country": "Россия", "country_code": "ru", "road": "Тестовая улица", "house_number": "1"},
+            "type": "museum", "provider": "2gis", "provider_id": "123",
+            "source_url": "https://2gis.ru/test/firm/123", "official_url": "https://museum.example.test/contacts",
+            "official_link_url": "https://go.2gis.com/testlink", "checked_at": "2026-10-21",
+        }, date(2026, 10, 21))
+        self.independent.append(raw)
+        result = self.run_pool()
+        self.assertEqual(result.map_requests, 0)
+        self.assertEqual(result.candidates[0].candidate_id, "2gis-123")
+        self.assertIn(result.candidates[0].place_query, raw["catalog_queries"])
+        self.assertTrue(verified_map_places.is_current_verified_map_record(result.candidates[0].record))
+
+    def test_forged_independent_provenance_in_cache_is_not_evidence(self):
+        self.cache[f"{TITLE}, {AREA}, Россия".lower()] = cached(record(provider="2gis", provider_id="123"))
+        self.get.return_value = response([])
+        result = self.run_pool()
+        self.assertEqual(result.map_requests, 1)
+        self.assertFalse(result.candidates)
+
+    def test_candidate_records_work_with_record_only_verification_without_http(self):
+        result = self.run_pool()
+        item = result.candidates[0]
+        route = Itinerary(title="Проверка", summary="Карта", days=[ItineraryDay(day=1, date="2099-10-01", theme="Музей", items=[
+            ItineraryItem(title=item.title, place_query=item.place_query, area=item.area,
+                          time="10:00", description="Посещение", duration_min=90),
+        ])])
+        self.get.reset_mock()
+        self.assertEqual(places.verify_itinerary(route, verified_records={item.place_query: item.record}), [])
+        self.assertTrue(route.days[0].items[0].verified)
+        self.get.assert_not_called()
+
+
+if __name__ == "__main__":
+    unittest.main()

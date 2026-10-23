@@ -1,0 +1,222 @@
+{
+  "version": 1,
+  "places": [
+    {
+      "destination": "Воркута, Россия",
+      "title": "Воркутинский краеведческий музей",
+      "place_query": "улица Гагарина, 7, Воркута, Россия",
+      "lat": 67.504497,
+      "lon": 64.05727,
+      "official_name": "7, улица Гагарина, Воркута, муниципальный округ Воркута, Республика Коми, Россия",
+      "description": "Музей по актуальному адресу; часы работы и праздничный график нужно подтвердить перед визитом.",
+      "indoor": true,
+      "access_mode": "opening_hours_required",
+      "trusted_late": false,
+      "status": "active",
+      "verified_at": "2026-10-12",
+      "source": "https://www.culture.ru/institutes/99506/vorkutinskii-kraevedcheskii-muzei"
+    },
+    {
+      "destination": "Воркута, Россия",
+      "title": "Архитектура Воркутинского арктического горно-политехнического колледжа",
+      "place_query": "улица Ленина, 46, Воркута, Россия",
+      "lat": 67.4976887,
+      "lon": 64.0628072,
+      "official_name": "Воркутинский арктический горно-политехнический колледж, 46, улица Ленина, Воркута, Россия",
+      "description": "Внешний осмотр памятника градостроительства без предположения о доступе внутрь.",
+      "indoor": false,
+      "access_mode": "exterior",
+      "trusted_late": true,
+      "status": "active",
+      "verified_at": "2026-10-12",
+      "source": "https://tourism.rkomi.ru/travel-guide/vorkutinskij-arkticheskij-gorno-politehnicheskij-kolledzh"
+    },
+    {
+      "destination": "Воркута, Россия",
+      "title": "Воркутинский драматический театр и Юбилейная площадь",
+      "place_query": "Юбилейная площадь, 1, Воркута, Россия",
+      "lat": 67.4981026,
+      "lon": 64.0597281,
+      "official_name": "1, Юбилейная площадь, Воркута, муниципальный округ Воркута, Республика Коми, Россия",
+      "description": "Внешний архитектурный осмотр театра и площади; спектакль возможен только по опубликованной афише.",
+      "indoor": false,
+      "access_mode": "exterior",
+      "trusted_late": true,
+      "status": "active",
+      "verified_at": "2026-10-12",
+      "source": "https://vorkutadramteatr.ru/afisha/all"
+    },
+    {
+      "destination": "Воркута, Россия",
+      "title": "Площадь Мира",
+      "place_query": "площадь Мира, Воркута, Россия",
+      "lat": 67.4938293,
+      "lon": 64.0496159,
+      "official_name": "площадь Мира, Воркута, муниципальный округ Воркута, Республика Коми, Россия",
+      "description": "Самостоятельный осмотр площади Мира и её архитектурного ансамбля.",
+      "indoor": false,
+      "access_mode": "public_exterior",
+      "trusted_late": true,
+      "status": "active",
+      "verified_at": "2026-10-12",
+      "source": "https://tourism.rkomi.ru/about/cities/vorkuta"
+    },
+    {
+      "destination": "Воркута, Россия",
+      "title": "Памятник Победы и площадь Победы",
+      "place_query": "площадь Победы, Воркута, Россия",
+      "lat": 67.5149701,
+      "lon": 64.0695754,
+      "official_name": "Площадь Победы, улица Ленина, Воркута, муниципальный округ Воркута, Республика Коми, Россия",
+      "description": "Короткий самостоятельный осмотр мемориала и площади без привязки к часам работы помещений.",
+      "indoor": false,
+      "access_mode": "public_exterior",
+      "trusted_late": true,
+      "status": "active",
+      "verified_at": "2026-10-12",
+      "source": "https://tourism.rkomi.ru/travel-guide/pamyatnik-pobedy"
+    },
+    {
+      "destination": "Воркута, Россия",
+      "title": "Церковь Архангела Михаила",
+      "place_query": "улица Горняков, 11, Воркута, Россия",
+      "lat": 67.4935075,
+      "lon": 64.0294925,
+      "official_name": "Храм святого Михаила, 11, улица Горняков, Воркута, муниципальный округ Воркута, Республика Коми, Россия",
+      "description": "Внешний осмотр храма; заходить внутрь только если он открыт и это не мешает службе.",
+      "indoor": false,
+      "access_mode": "exterior",
+      "trusted_late": true,
+      "status": "active",
+      "verified_at": "2026-10-12",
+      "source": "https://tourism.rkomi.ru/travel-guide/tserkov-arhangela-mihaila"
+    },
+    {
+      "destination": "Воркута, Россия",
+      "title": "Дворец культуры шахтёров",
+      "place_query": "Дворец культуры шахтёров, Воркута, Россия",
+      "lat": 67.4943548,
+      "lon": 64.0483605,
+      "official_name": "Дворец культуры шахтёров, 1, площадь Мира, Воркута, муниципальный округ Воркута, Республика Коми, Россия",
+      "description": "Внешний осмотр здания; посещение мероприятий возможно только по актуальной афише.",
+      "indoor": false,
+      "access_mode": "exterior",
+      "trusted_late": true,
+      "status": "active",
+      "verified_at": "2026-10-12",
+      "source": "https://tourism.rkomi.ru/travel-guide/dvorets-kultury-shahtyorov-i-stroitelej"
+    },
+    {
+      "destination": "Воркута, Россия",
+      "title": "Мемориальный комплекс «Щит и меч»",
+      "place_query": "улица Мира, 23, Воркута, Россия",
+      "lat": 67.4957379,
+      "lon": 64.0443309,
+      "official_name": "23, улица Мира, Воркута, муниципальный округ Воркута, Республика Коми, Россия",
+      "description": "Самостоятельный осмотр мемориального комплекса на пересечении улиц Парковой и Мира.",
+      "indoor": false,
+      "access_mode": "public_exterior",
+      "trusted_late": true,
+      "status": "active",
+      "verified_at": "2026-10-12",
+      "source": "https://tourism.rkomi.ru/travel-guide/memorialnyj-kompleks-shchit-i-mech"
+    },
+    {
+      "destination": "Воркута, Россия",
+      "title": "Стела «Воркута — город трудовой доблести»",
+      "place_query": "МО ГО Воркута, Центральная площадь, 7, Воркута, Россия",
+      "lat": 67.5029623,
+      "lon": 64.0604583,
+      "official_name": "МО ГО Воркута, 7, Центральная площадь, Воркута, муниципальный округ Воркута, Республика Коми, Россия",
+      "description": "Короткий самостоятельный осмотр стелы и Центральной площади.",
+      "indoor": false,
+      "access_mode": "public_exterior",
+      "trusted_late": true,
+      "status": "active",
+      "verified_at": "2026-10-12",
+      "source": "https://tourism.rkomi.ru/travel-guide/stela-vorkuta--gorod-trudovoj-doblesti"
+    },
+    {
+      "destination": "Воркута, Россия",
+      "title": "Знак «Воркута — 67-я параллель»",
+      "place_query": "Воркута - 67-я параллель, Воркута, Россия",
+      "lat": 67.4879758,
+      "lon": 64.0230081,
+      "official_name": "Воркута - 67-я параллель, Усинская улица, Воркута, муниципальный округ Воркута, Республика Коми, Россия",
+      "description": "Короткий самостоятельный осмотр одного из символов заполярного города.",
+      "indoor": false,
+      "access_mode": "public_exterior",
+      "trusted_late": true,
+      "status": "active",
+      "verified_at": "2026-10-12",
+      "source": "https://tourism.rkomi.ru/travel-guide/znak-vorkuta-67-parallel"
+    },
+    {
+      "destination": "Воркута, Россия",
+      "title": "Городской парк культуры и отдыха имени 40-летия ВЛКСМ",
+      "place_query": "улица Ленинградская, 14А, Воркута, Россия",
+      "lat": 67.4956629,
+      "lon": 64.0373909,
+      "official_name": "14А, Ленинградская улица, Воркута, муниципальный округ Воркута, Республика Коми, Россия",
+      "description": "Самостоятельная прогулка по парку; каток и прокат учитываются только после отдельной проверки работы.",
+      "indoor": false,
+      "access_mode": "public_exterior",
+      "trusted_late": true,
+      "status": "active",
+      "verified_at": "2026-10-12",
+      "source": "https://tourism.rkomi.ru/travel-guide/gorodskoj-park-kultury-i-otdyha-imeni-40-letiya-vlksm"
+    },
+    {
+      "destination": "Воркута, Россия",
+      "title": "Железнодорожный вокзал Воркуты и паровоз-памятник",
+      "place_query": "Привокзальная площадь, 3, Воркута, Россия",
+      "lat": 67.4703626,
+      "lon": 64.0257233,
+      "official_name": "Привокзальная площадь, Воркута, муниципальный округ Воркута, Республика Коми, Россия",
+      "description": "Осмотр вокзального комплекса и паровоза-памятника; при холоде можно использовать круглосуточный зал ожидания.",
+      "indoor": false,
+      "access_mode": "public_24h",
+      "trusted_late": true,
+      "status": "active",
+      "verified_at": "2026-10-12",
+      "source": "https://vorkuta.dzvr.ru/"
+    }
+  ],
+  "blocked_places": [
+    {
+      "destination": "Воркута, Россия",
+      "title": "Кинотеатр «Каскад»",
+      "aliases": [
+        "Каскад",
+        "Кинотеатр Каскад",
+        "Кинотеатр «Каскад»",
+        "Каскад (кинотеатр)"
+      ],
+      "place_queries": [
+        "Кинотеатр Каскад, Воркута, Россия",
+        "Каскад, Центральная площадь, 1, Воркута, Россия"
+      ],
+      "reason": "Кинотеатр отмечен как временно закрытый; не включать его в программу без нового подтверждения открытия.",
+      "status": "blocked",
+      "verified_at": "2026-10-12",
+      "source": "https://www.afisha.ru/vorkuta/cinema/kaskad-vorkuta-54906/"
+    },
+    {
+      "destination": "Воркута, Россия",
+      "title": "Старый адрес Воркутинского краеведческого музея",
+      "aliases": [],
+      "place_queries": [
+        "улица Ленина, 38, Воркута, Россия",
+        "Воркутинский краеведческий музей, улица Ленина, 38, Воркута, Россия",
+        "Воркутинский краеведческий музей, Ленина, 38, Воркута, Россия"
+      ],
+      "official_names": [
+        "Воркутинский краеведческий музей, 38, улица Ленина, Воркута"
+      ],
+      "reason": "Музей работает по актуальному адресу: улица Гагарина, 7; старый адрес на улице Ленина не использовать.",
+      "status": "blocked",
+      "verified_at": "2026-10-12",
+      "source": "https://www.culture.ru/institutes/99506/vorkutinskii-kraevedcheskii-muzei"
+    }
+  ]
+}

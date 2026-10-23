@@ -1,0 +1,4 @@
+-r requirements.txt
+
+# Required by offline PDF regression checks; production dependencies stay above.
+pypdf==6.10.0

@@ -1,0 +1,309 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#102b46">
+  <title>Семейный планировщик путешествий</title>
+  <link rel="icon" href="/static/favicon.svg?v=20261022-premium-travel" type="image/svg+xml">
+  <link rel="stylesheet" href="/static/vendor/leaflet.css">
+  <link rel="stylesheet" href="/static/styles.css?v=20261022-invite-access">
+</head>
+<body>
+  <div class="page-glow page-glow-one"></div>
+  <div class="page-glow page-glow-two"></div>
+
+  <section id="loginGate" class="login-gate" hidden>
+    <div class="login-card">
+      <div class="brand-mark" aria-hidden="true"><img src="/static/favicon.svg?v=20261022-premium-travel" alt="" width="64" height="64"></div>
+      <p class="eyebrow">Семейный планировщик</p>
+      <h1>Ваши поездки — в одном месте</h1>
+      <p>Откройте Telegram-бота и отправьте команду <strong>/web</strong>. Бот пришлёт одноразовую безопасную ссылку.</p>
+      <button id="retryLogin" class="button button-primary" type="button">Проверить вход</button>
+      <p class="microcopy">Ссылка действует недолго и используется только один раз.</p>
+    </div>
+  </section>
+
+  <section id="accessGate" class="login-gate" hidden>
+    <div class="login-card">
+      <p class="eyebrow">Семейный планировщик</p>
+      <h1>Доступ по приглашению</h1>
+      <p id="accessGateMessage" role="status"></p>
+      <button id="retryAccess" class="button button-primary" type="button">Проверить доступ</button>
+      <p class="microcopy">Новые платные операции не запускаются. Ваши поездки не удалены.</p>
+    </div>
+  </section>
+
+  <div id="appShell" class="app-shell" hidden>
+    <header class="topbar">
+      <button id="brandHome" class="brand" type="button" aria-label="Открыть мои поездки">
+        <span class="brand-mark brand-mark-small" aria-hidden="true"><img src="/static/favicon.svg?v=20261022-premium-travel" alt="" width="48" height="48"></span>
+        <span><strong>Семейный планировщик</strong><small>Путешествуйте спокойнее</small></span>
+      </button>
+      <div class="topbar-actions">
+        <span id="userName" class="user-chip"></span>
+        <button id="logoutButton" class="button button-ghost" type="button">Выйти</button>
+      </div>
+    </header>
+
+    <main class="main-content">
+      <div id="savedTripNotice" class="saved-trip-notice" role="status" hidden></div>
+      <p id="accessDeniedNotice" class="access-denied-notice" role="alert" hidden></p>
+      <section id="tripsView">
+        <div class="hero travel-hero">
+          <svg class="hero-route" viewBox="0 0 1000 320" fill="none" aria-hidden="true" focusable="false">
+            <g stroke="currentColor" stroke-width="1" opacity=".5">
+              <path d="M-40 205C60 140 78 245 190 200S326 126 362 185 500 226 600 190 740 217 815 165 932 130 1040 156M-40 225C60 160 78 265 190 220S326 146 362 205 500 246 600 210 740 237 815 185 932 150 1040 176M-40 245C60 180 78 285 190 240S326 166 362 225 500 266 600 230 740 257 815 205 932 170 1040 196M-40 265C60 200 78 305 190 260S326 186 362 245 500 286 600 250 740 277 815 225 932 190 1040 216"/>
+              <path d="M0 15C65 0 75 65 130 52S190 12 245 50M0 30C65 15 75 80 130 67S190 27 245 65M0 45C65 30 75 95 130 82S190 42 245 80"/>
+            </g>
+            <path d="M575 95C650 18 773 42 873 75" stroke="currentColor" stroke-width="2" stroke-dasharray="5 7" opacity=".8"/>
+            <g stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2">
+              <path d="m886 66 26-10-4 6-11 6-6 10-5 1 2-10-13 3-5-4 15-2-8-7 4-2 11 8"/>
+              <g transform="translate(65 270)"><path d="M0 15V0h81q12 0 20 15H0Zm0 5h101M8 4h13v6H8Zm21 0h13v6H29Zm21 0h13v6H50Zm21 0h13l7 6H71Z"/><circle cx="14" cy="18" r="3"/><circle cx="84" cy="18" r="3"/></g>
+              <g transform="translate(882 249)"><path d="m0 14 6-4 6-10h22l9 10 9 4v8H0Zm13-12-5 9h29l-6-9M23 2v9"/><circle cx="11" cy="22" r="4"/><circle cx="41" cy="22" r="4"/></g>
+            </g>
+          </svg>
+          <div class="hero-copy">
+            <p class="eyebrow hero-eyebrow">Ваш личный атлас путешествий</p>
+            <h1>Мои поездки</h1>
+            <p class="hero-description">Вдохновение для новых открытий. Маршруты, бюджет и всё важное — рядом.</p>
+            <button id="newTripButton" class="button button-primary" type="button">＋ Новая поездка</button>
+          </div>
+          <span class="hero-image-label">ИИ-иллюстрация путешествия</span>
+        </div>
+
+        <aside id="accessStatus" class="access-status" aria-label="Доступ к планировщику" aria-live="polite" hidden></aside>
+
+        <div class="trip-list-tools">
+          <div class="filter-row" role="group" aria-label="Фильтр поездок">
+            <button class="filter-button is-active" data-filter="all" type="button" aria-pressed="true">Все</button>
+            <button class="filter-button" data-filter="upcoming" type="button" aria-pressed="false">Предстоящие</button>
+            <button class="filter-button" data-filter="past" type="button" aria-pressed="false">Прошедшие</button>
+          </div>
+          <label class="trip-search" for="tripSearch">
+            <span class="visually-hidden">Найти поездку</span>
+            <span aria-hidden="true">⌕</span>
+            <input id="tripSearch" type="search" maxlength="100" placeholder="Найти поездку" autocomplete="off">
+          </label>
+        </div>
+
+        <p id="tripResultsStatus" class="visually-hidden" aria-live="polite"></p>
+        <div id="tripsGrid" class="trip-years"></div>
+        <div id="emptyTrips" class="empty-state" hidden>
+          <span aria-hidden="true">🧭</span>
+          <h2 id="emptyTripsTitle">Здесь появятся ваши маршруты</h2>
+          <p id="emptyTripsText">Создайте первую поездку — она сразу появится в кабинете.</p>
+        </div>
+      </section>
+
+      <section id="tripView" hidden>
+        <button id="backButton" class="back-button" type="button">← Все поездки</button>
+        <div id="tripHero" class="trip-detail-cover"></div>
+        <section id="tripCoverControls" class="cover-controls" aria-label="ИИ-обложка поездки" aria-live="polite" hidden></section>
+        <div id="tripHeader" class="trip-header"></div>
+        <section id="tripNotes" class="panel trip-notes" aria-label="Описание и советы к поездке" hidden></section>
+
+        <nav id="dayTabs" class="day-tabs" aria-label="Дни маршрута"></nav>
+
+        <div class="detail-layout">
+          <div class="detail-main">
+            <section class="panel route-panel">
+              <div class="panel-heading">
+                <div>
+                  <p class="eyebrow">Программа дня</p>
+                  <h2 id="dayTitle"></h2>
+                </div>
+                <button id="editDayButton" class="button button-primary button-small" type="button">Изменить день</button>
+              </div>
+              <div id="dayGeography" class="rain-card" hidden></div>
+              <div id="timeline" class="timeline"></div>
+              <div id="rainAlternative" class="rain-card" hidden></div>
+            </section>
+
+            <section class="panel map-panel">
+              <div class="panel-heading">
+                <div>
+                  <p class="eyebrow">Проверенные места</p>
+                  <h2>Карта дня</h2>
+                </div>
+                <span class="verified-badge">Подложка OpenStreetMap</span>
+              </div>
+              <div id="map" class="map" aria-label="Карта маршрута"></div>
+              <p id="mapEmpty" class="muted" hidden>Для этого дня пока нет подтверждённых координат.</p>
+            </section>
+          </div>
+
+          <aside class="detail-side">
+            <section id="budgetPanel" class="panel"></section>
+            <section class="panel">
+              <div class="panel-heading compact"><h2>Чек-лист</h2><span id="checklistCount"></span></div>
+              <div class="progress-track"><span id="checklistProgress"></span></div>
+              <div id="checklistGroups" class="checklist-groups"></div>
+            </section>
+            <section class="panel">
+              <div class="panel-heading compact"><h2>Напоминания</h2></div>
+              <pre id="remindersText" class="reminders"></pre>
+            </section>
+          </aside>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <dialog id="editDialog" class="dialog">
+    <form id="editForm" method="dialog">
+      <div class="dialog-head">
+        <div><p class="eyebrow">AI-редактирование</p><h2 id="editDialogTitle">Изменить день</h2></div>
+        <button id="closeEditDialog" class="icon-button" type="button" aria-label="Закрыть">×</button>
+      </div>
+      <p>Опишите результат обычными словами. Остальные дни останутся без изменений.</p>
+      <label for="editInstruction">Ваше пожелание</label>
+      <p id="editScopeNote" class="field-hint"></p>
+      <textarea id="editInstruction" maxlength="600" minlength="3" rows="5" placeholder="Например: добавь после музея базилику Сакре-Кёр, сохрани обед и дневной отдых" required></textarea>
+      <div class="dialog-actions">
+        <button id="cancelEdit" class="button button-ghost" type="button">Отмена</button>
+        <button id="submitEdit" class="button button-primary" type="submit">Проверить и изменить</button>
+      </div>
+      <div id="editMessage" class="form-message" aria-live="polite"></div>
+    </form>
+  </dialog>
+
+  <dialog id="infoDialog" class="dialog trip-form-dialog">
+    <form id="newTripForm">
+      <div class="dialog-head">
+        <div><p class="eyebrow">Новый маршрут</p><h2>Новая поездка</h2></div>
+        <button id="closeInfoDialog" class="icon-button" type="button" aria-label="Закрыть">×</button>
+      </div>
+      <p class="dialog-intro">Расскажите о поездке — планировщик составит семейный маршрут, проверит места и подготовит чек-лист.</p>
+      <p id="cityMvpDisclosure" class="dialog-intro" role="note" hidden></p>
+
+      <div class="form-grid">
+        <label class="form-field form-span-2" for="tripDestinationKind">
+          <span>Тип направления</span>
+          <select id="tripDestinationKind" name="destination_kind" aria-describedby="tripDestinationHint" required>
+            <option value="city">Город</option>
+            <option value="region">Регион, озеро или территория</option>
+          </select>
+          <small id="tripDestinationHint">Для города маршрут планируется в городском радиусе.</small>
+        </label>
+        <label class="form-field form-span-2" for="tripDestination">
+          <span id="tripDestinationLabel">Город и страна</span>
+          <input id="tripDestination" name="destination" type="text" minlength="2" maxlength="100" placeholder="Например: Казань, Россия" autocomplete="off" required>
+        </label>
+        <label class="form-field" for="tripStartDate">
+          <span>Дата начала</span>
+          <input id="tripStartDate" name="start_date" type="date" required>
+        </label>
+        <label class="form-field" for="tripEndDate">
+          <span>Дата окончания</span>
+          <input id="tripEndDate" name="end_date" type="date" required>
+        </label>
+        <label class="form-field" for="tripAdults">
+          <span>Взрослых</span>
+          <input id="tripAdults" name="adults" type="number" min="1" max="10" step="1" required>
+        </label>
+        <div class="form-field children-field">
+          <div class="field-label-row">
+            <label for="tripChildrenAges">Возраст детей</label>
+            <label class="compact-check" for="tripNoChildren">
+              <input id="tripNoChildren" type="checkbox">
+              <span>Без детей</span>
+            </label>
+          </div>
+          <input id="tripChildrenAges" name="children_ages" type="text" inputmode="numeric" maxlength="30" placeholder="Например: 0, 4, 9">
+          <small>До 6 детей через запятую; 0 — младенец</small>
+        </div>
+        <label class="form-field" for="tripBudget">
+          <span>Общий бюджет поездки</span>
+          <input id="tripBudget" name="budget" type="number" min="1" max="1000000000" step="0.01" placeholder="600" required>
+        </label>
+        <label class="form-field" for="tripCurrency">
+          <span>Валюта</span>
+          <select id="tripCurrency" name="currency" required>
+            <option value="EUR">EUR — евро</option>
+            <option value="USD">USD — доллар</option>
+            <option value="RUB">RUB — рубль</option>
+          </select>
+        </label>
+        <label class="form-field" for="tripTravelCost">
+          <span>Дорога туда и обратно</span>
+          <input id="tripTravelCost" name="travel_cost" type="number" min="0" max="1000000000" step="0.01" placeholder="0">
+          <small>Общая сумма на всех участников</small>
+        </label>
+        <label class="form-field" for="tripLodgingCost">
+          <span>Жильё за всю поездку</span>
+          <input id="tripLodgingCost" name="lodging_cost" type="number" min="0" max="1000000000" step="0.01" placeholder="0">
+          <small>Общая сумма за все ночи</small>
+        </label>
+        <div class="budget-form-note form-span-4">
+          <p>Все суммы — в выбранной валюте. Цены в другой валюте пересчитайте заранее. Пустая сумма или 0 означают, что расход не указан и не учтён.</p>
+          <p id="tripProgramBudget" aria-live="polite">Укажите общий бюджет, чтобы увидеть сумму на программу.</p>
+        </div>
+        <label class="form-field" for="tripStartTime">
+          <span>Начинаем день</span>
+          <input id="tripStartTime" name="start_time" type="time" min="06:00" max="23:30" step="1800" required>
+        </label>
+        <label class="form-field" for="tripEndTime">
+          <span>Заканчиваем день</span>
+          <input id="tripEndTime" name="end_time" type="time" min="06:00" max="23:30" step="1800" required>
+        </label>
+        <label class="form-field" for="tripPace">
+          <span>Темп поездки</span>
+          <select id="tripPace" name="pace" required>
+            <option value="спокойный">Спокойный</option>
+            <option value="средний">Средний</option>
+            <option value="насыщенный">Насыщенный</option>
+          </select>
+        </label>
+        <label class="form-field" for="tripLocationPreference">
+          <span>Где планировать</span>
+          <select id="tripLocationPreference" name="location_preference" required>
+            <option value="anywhere">Район не важен</option>
+            <option value="nearby">Рядом с жильём</option>
+          </select>
+        </label>
+        <label class="form-field form-span-2" for="tripGoal">
+          <span>Цель поездки</span>
+          <input id="tripGoal" name="trip_goal" type="text" minlength="2" maxlength="160" placeholder="Например: познакомиться с городом и отдохнуть" required>
+        </label>
+        <label id="tripStayAreaField" class="form-field form-span-2" for="tripStayArea" hidden>
+          <span>Район проживания или ближайшая станция</span>
+          <input id="tripStayArea" name="stay_area" type="text" maxlength="120" placeholder="Например: Василеостровская">
+        </label>
+
+        <fieldset class="interest-fieldset form-span-4">
+          <legend>Что хочется посетить <small>выберите хотя бы один вариант</small></legend>
+          <div class="interest-grid">
+            <label class="interest-chip"><input type="checkbox" name="interest_categories" value="main_sights" checked><span>Главные места</span></label>
+            <label class="interest-chip"><input type="checkbox" name="interest_categories" value="museums"><span>Музеи и выставки</span></label>
+            <label class="interest-chip"><input type="checkbox" name="interest_categories" value="theatre"><span>Театр</span></label>
+            <label class="interest-chip"><input type="checkbox" name="interest_categories" value="cinema"><span>Кино</span></label>
+            <label class="interest-chip"><input type="checkbox" name="interest_categories" value="water_trips"><span>Водные прогулки</span></label>
+            <label class="interest-chip"><input type="checkbox" name="interest_categories" value="parks"><span>Парки и природа</span></label>
+            <label class="interest-chip"><input type="checkbox" name="interest_categories" value="zoos"><span>Зоопарки и аквариумы</span></label>
+            <label class="interest-chip"><input type="checkbox" name="interest_categories" value="amusement_parks"><span>Аттракционы</span></label>
+            <label class="interest-chip"><input type="checkbox" name="interest_categories" value="shopping_malls"><span>Торговые центры</span></label>
+          </div>
+        </fieldset>
+
+        <label class="form-field form-span-4" for="tripWishes">
+          <span>Дополнительные пожелания</span>
+          <textarea id="tripWishes" name="wishes" maxlength="500" rows="1" placeholder="Например: избегать длинных очередей"></textarea>
+        </label>
+      </div>
+
+      <div id="newTripMessage" class="form-message" role="alert" aria-live="polite"></div>
+      <div class="dialog-actions">
+        <button id="cancelNewTrip" class="button button-ghost" type="button">Отмена</button>
+        <button id="submitNewTrip" class="button button-primary" type="submit">Составить маршрут</button>
+      </div>
+    </form>
+  </dialog>
+
+  <div id="loading" class="loading" hidden><span class="spinner"></span><span id="loadingText">Загружаю…</span></div>
+  <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+
+  <script src="/static/vendor/leaflet.js"></script>
+  <script src="/static/app.js?v=20261023-invite-five" defer></script>
+</body>
+</html>
