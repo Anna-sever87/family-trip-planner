@@ -8,8 +8,12 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends fonts-dejavu-core \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --uid 10001 --create-home --home-dir /home/planner planner \
-    && mkdir -p /app /data \
-    && chown planner:planner /data
+    && mkdir -p /app /data/output \
+    && ln -s /data/output /app/output \
+    && chown planner:planner /data /data/output
+
+# Source-relative and working-directory output paths share the writable volume.
+# In particular, bot and web must use the same persistent Nominatim request clock.
 
 WORKDIR /app
 COPY requirements.txt /app/requirements.txt

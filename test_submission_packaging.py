@@ -1,8 +1,10 @@
 """Read-only allowlist checks: no image build, archive, secrets or app imports."""
 
 from pathlib import Path
+import ast
 import hashlib
 import io
+import re
 import struct
 import tempfile
 import unittest
@@ -14,6 +16,44 @@ from tools import build_submission_archive as packaging
 
 
 class SubmissionPackagingTests(unittest.TestCase):
+    def test_docker_source_output_resolves_to_owned_shared_data(self):
+        dockerfile = (packaging.ROOT / "Dockerfile").read_text(encoding="utf-8")
+        logical = dockerfile.replace("\\\n", " ")
+        self.assertIn("mkdir -p /app /data/output", logical)
+        self.assertIn("ln -s /data/output /app/output", logical)
+        self.assertIn("chown planner:planner /data /data/output", logical)
+        self.assertIn("WORKDIR /data\nUSER planner", dockerfile)
+        self.assertLess(logical.index("ln -s /data/output /app/output"), logical.index("USER planner"))
+
+    def test_both_containers_keep_read_only_root_and_shared_data_volume(self):
+        compose = (packaging.ROOT / "compose.yaml").read_text(encoding="utf-8")
+        services = dict(re.findall(r"^  (web|bot):\n(.*?)(?=^  [A-Za-z_][\w-]*:|\Z)",
+                                   compose, flags=re.MULTILINE | re.DOTALL))
+        self.assertEqual(set(services), {"web", "bot"})
+        for service, block in services.items():
+            with self.subTest(service=service):
+                self.assertRegex(block, r"(?m)^    read_only: true$")
+                self.assertRegex(block, r"(?m)^      - planner-data:/data$")
+                self.assertNotRegex(block, r"(?m)^    privileged: true$")
+                self.assertIn("      - no-new-privileges:true", block)
+
+    def test_source_relative_runtime_output_is_covered_by_docker_symlink(self):
+        # Parse source without importing application modules or creating clocks.
+        source_output = []
+        for name in packaging.RUNTIME_MODULES:
+            tree = ast.parse((packaging.ROOT / name).read_text(encoding="utf-8-sig"))
+            for node in ast.walk(tree):
+                if not isinstance(node, (ast.Assign, ast.AnnAssign)) or node.value is None:
+                    continue
+                descendants = tuple(ast.walk(node.value))
+                if (any(isinstance(part, ast.Name) and part.id == "__file__" for part in descendants)
+                        and any(isinstance(part, ast.Constant) and part.value == "output"
+                                for part in descendants)):
+                    source_output.append((name, ast.unparse(node.value)))
+        self.assertEqual(source_output, [
+            ("places.py", "Path(__file__).resolve().parent / 'output' / 'nominatim_clock.db'"),
+        ])
+
     def check_fixture(self, text, name="README.md"):
         with tempfile.TemporaryDirectory() as directory, patch.object(packaging, "ROOT", Path(directory)):
             path = Path(directory) / name
