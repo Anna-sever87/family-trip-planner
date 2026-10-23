@@ -26,6 +26,8 @@
 !city_preferences.py
 !city_evidence.py
 !generation_jobs.py
+!generation_quality.py
+!cover_subjects.py
 !cover_prompts.py
 !yandex_art.py
 !trip_covers.py

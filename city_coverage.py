@@ -81,7 +81,7 @@ def build_city_program_witness(request: TripRequest, candidates, rainy_dates=(),
 
     The old independent upper bounds could reserve three days even when only
     two disjoint groups satisfy them together. Enumerate minimal groups, then
-    search their disjoint packings. At most 18 candidates / five visits per
+    search their disjoint packings. At most 24 candidates / five visits per
     group are inspected; subset checks AND packing states share max_states.
     If it expires, return only a packing actually found, possibly empty.
 
@@ -97,8 +97,8 @@ def build_city_program_witness(request: TripRequest, candidates, rainy_dates=(),
     if type(max_states) is not int or not 1 <= max_states <= CITY_PACKING_MAX_STATES:
         raise ValueError("Лимит поиска должен быть целым числом от 1 до 20000.")
     candidates = list(candidates)
-    if len(candidates) > 18:
-        raise ValueError("Для ограниченного поиска допускается не более 18 кандидатов.")
+    if len(candidates) > 24:
+        raise ValueError("Для ограниченного поиска допускается не более 24 кандидатов.")
     first = date.fromisoformat(request.start_date)
     dates = [(first + timedelta(days=index)).isoformat() for index in range(request.days_count)]
     rainy = set(rainy_dates)
@@ -141,11 +141,12 @@ def build_city_program_witness(request: TripRequest, candidates, rainy_dates=(),
     }
     dry_groups, wet_groups = [], []
     states, examined, exhausted = 0, 0, False
+    group_limit = min(max_states - 1, max(1, max_states * 3 // 4))
     for size in range(1, min(max_visits, len(candidates)) + 1):
         for indices in combinations(range(len(candidates)), size):
-            # Reserve one search state so even a truncated group enumeration
-            # can return a group it has already proved compatible.
-            if states >= max_states - 1:
+            # Reserve a quarter of the unchanged global budget for packing;
+            # a larger bounded pool must not leave only one calendar state.
+            if states >= group_limit:
                 exhausted = True
                 break
             states += 1

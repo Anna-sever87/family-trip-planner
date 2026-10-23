@@ -18,6 +18,7 @@ import db
 import access_control
 import access_guard
 import web_service
+from generation_quality import KEY as QUALITY_KEY, safe_coverage
 from schemas import TripRequest
 from yandex_ai import YandexAIError
 
@@ -26,7 +27,7 @@ MAX_WORKERS = 2
 MESSAGES = {
     "queued": "Заявка принята. Можно закрыть страницу: состояние сохранено.",
     "running": "Маршрут составляется и проверяется. Можно закрыть страницу и вернуться позже.",
-    "succeeded": "Маршрут создан и сохранён. Повторный запуск не нужен.",
+    "succeeded": "Результат сохранён. Откройте поездку и проверьте полноту программы. Повторный запуск не нужен.",
     "interrupted": "Сервер был перезапущен до подтверждения результата. Платная операция автоматически не повторялась. Проверьте список поездок перед новым запуском.",
     "account_change": "Обработка остановлена из-за изменения состояния аккаунта. Генерация по этой заявке не запускалась автоматически повторно. Проверьте список поездок перед новым запуском.",
     "validation": "Маршрут не прошёл обязательные проверки. Новая поездка не сохранена; повторная генерация автоматически не запускалась.",
@@ -80,16 +81,30 @@ def _owner(conn, tg_id, account_key):
         raise JobNotFoundError("Заявка не найдена.")
 
 
-def public_status(row):
+def public_status(row, conn=None):
     state = row["status"]
     code = row["failure_code"] if state == "failed" else state
     if state == "interrupted" and row["failure_code"] == "account_change":
         code = "account_change"
     if state == "succeeded" and row["trip_id"] is None:
         code = "deleted"
+    message = MESSAGES.get(code, MESSAGES["internal"])
+    if conn is not None and state == "succeeded" and row["trip_id"] is not None:
+        trip = conn.execute("SELECT request_json, itinerary_json FROM trips WHERE id=? AND tg_id=?",
+                            (row["trip_id"], row["tg_id"])).fetchone()
+        if trip is not None:
+            try:
+                quality = safe_coverage(json.loads(trip["request_json"]).get(QUALITY_KEY))
+                days = json.loads(trip["itinerary_json"]).get("days", [])
+                free = sum(isinstance(day, dict) and day.get("day_mode") == "free" for day in days)
+                if free or quality.get("quality_status") == "partial":
+                    message = ("Программа составлена частично и сохранена. Не все дни или выбранные интересы удалось заполнить. "
+                               "Откройте поездку: там указаны ограничения. Повторный запуск не требуется.")
+            except (ValueError, TypeError, AttributeError):
+                pass  # Saved result remains available; do not expose damaged/private data.
     return {"job_id": row["job_id"], "status": state,
             "trip_id": row["trip_id"] if state == "succeeded" else None,
-            "message": MESSAGES.get(code, MESSAGES["internal"])}
+            "message": message}
 
 
 def get_job(tg_id, account_key, *, job_id=None, key=None):
@@ -101,7 +116,7 @@ def get_job(tg_id, account_key, *, job_id=None, key=None):
                            (identifier, tg_id, account_key)).fetchone()
         if row is None:
             raise JobNotFoundError("Заявка не найдена.")
-        return public_status(row)
+        return public_status(row, conn)
 
 
 class GenerationJobs:
@@ -161,7 +176,7 @@ class GenerationJobs:
                     if old is not None:
                         if old["request_digest"] != digest:
                             raise JobConflictError("Ключ уже принадлежит другой анкете. Новая операция не запущена.")
-                        return public_status(old)
+                        return public_status(old, conn)
                     # Replays remain valid after the original travel date passes.
                     normalized = web_service._normalized_trip_request(request)
                     if conn.execute("SELECT 1 FROM generation_jobs WHERE account_key=? AND status IN ('queued','running')",

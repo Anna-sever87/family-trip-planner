@@ -29,7 +29,7 @@ from pricing import minimum_meal_cost
 from program_coverage import rebuild_program_report
 from prompts import build_itinerary_prompt, build_itinerary_system_prompt
 from rules import check_city_radius, check_program_depth, check_rules, check_verified_place_duplicates
-from schemas import Itinerary, ItineraryDay, TripRequest
+from schemas import INTEREST_LABELS, Itinerary, ItineraryDay, TripRequest
 from weather import CityResolutionError, RAIN_MM, find_city, get_weather, weather_summary
 from yandex_ai import YandexAIError
 
@@ -54,6 +54,7 @@ def _discovery_diagnostics(pool) -> dict:
         "canonical_record_mismatch", "country_mismatch_or_missing", "invalid_coordinates",
         "invalid_record", "missing_locality", "missing_provider_identity", "name_mismatch",
         "name_type_conflict", "outside_city_radius", "unsupported_poi_type",
+        "amusement_interest_not_requested", "specialized_animal_reserve_limit",
     }
     rejected = getattr(pool, "rejected", ())
     rejected = rejected if isinstance(rejected, (list, tuple)) else ()
@@ -77,6 +78,9 @@ def _discovery_diagnostics(pool) -> dict:
             value = raw.get(key)
             if type(value) is int and 0 <= value <= 1000:
                 diagnostics[key] = value
+        alternatives = raw.get("source_alternatives_confirmed")
+        if type(alternatives) is int and 0 <= alternatives <= 24:
+            diagnostics["source_alternatives_confirmed"] = alternatives
         for key in ("name_limit_reached", "map_limit_reached", "usable_limit_reached"):
             if type(raw.get(key)) is bool:
                 diagnostics[key] = raw[key]
@@ -84,13 +88,128 @@ def _discovery_diagnostics(pool) -> dict:
         if isinstance(limits, (tuple, list)):
             diagnostics["limits_reached"] = sorted({value for value in limits
                 if isinstance(value, str) and value in {"name_limit", "usable_limit", "http_limit"}})
+        for key in ("requested_categories", "missing_categories"):
+            values = raw.get(key)
+            if isinstance(values, (tuple, list)):
+                diagnostics[key] = sorted({value for value in values
+                                           if isinstance(value, str) and value in INTEREST_LABELS})
+        counts = raw.get("category_counts")
+        if isinstance(counts, dict):
+            diagnostics["category_counts"] = {key: value for key, value in counts.items()
+                if key in INTEREST_LABELS and type(value) is int and 0 <= value <= 24}
+        from city_candidates import DETAIL_REJECTION_REASONS
+        rejected_details = raw.get("detail_rejection_reasons")
+        if isinstance(rejected_details, dict):
+            diagnostics["detail_rejection_reasons"] = {key: value for key, value in rejected_details.items()
+                if key in DETAIL_REJECTION_REASONS and type(value) is int and 0 <= value <= 1000}
+        target = raw.get("pool_target")
+        if type(target) is int and 0 <= target <= 24:
+            diagnostics["pool_target"] = target
+        for key in ("planning_minutes", "required_planning_minutes"):
+            value = raw.get(key)
+            if type(value) is int and 0 <= value <= 20160:
+                diagnostics[key] = value
+        for key, allowed in (("pool_quality", {"adequate", "limited", "empty"}),
+                             ("map_discovery_status", {"success", "empty", "unavailable", "not_requested"}),
+                             ("category_fallback_status", {"success", "empty", "unavailable", "not_requested"}),
+                             ("map_discovery_error", {"http_error", "timeout", "invalid_response",
+                                                      "oversized_response", "incomplete_response", "none"})):
+            value = raw.get(key)
+            if isinstance(value, str) and value in allowed:
+                diagnostics[key] = value
+        if type(raw.get("replenishment_attempted")) is bool:
+            diagnostics["replenishment_attempted"] = raw["replenishment_attempted"]
     return diagnostics
+
+
+def _interest_coverage(request, candidates, itinerary) -> dict:
+    """Observed category coverage, not a claim about popularity/visit access."""
+    from city_candidates import candidate_categories
+    from city_preferences import shopping_preference
+
+    requested = {value for value in request.interest_categories if value in INTEREST_LABELS}
+    shopping = shopping_preference(request)
+    if shopping == "requested":
+        requested.add("shopping_malls")
+    elif shopping == "excluded":
+        requested.discard("shopping_malls")
+    selected_queries = {item.place_query for day in itinerary.days for item in day.items
+                        if item.kind == "attraction"} if itinerary is not None else set()
+    result = {}
+    for interest in INTEREST_LABELS:
+        if interest not in requested:
+            continue
+        # A POI type cannot prove a sight's importance or that a boat trip is
+        # offered. Keep those qualitative choices explicitly unverified.
+        if interest in {"main_sights", "water_trips"}:
+            result[interest] = {"status": "not_verifiable", "confirmed_count": 0, "selected_count": 0}
+            continue
+        matches = [item for item in candidates if interest in candidate_categories(item)]
+        selected_count = sum(item.place_query in selected_queries for item in matches)
+        result[interest] = {"status": "covered" if selected_count else "not_scheduled" if matches else "not_confirmed",
+                            "confirmed_count": len(matches), "selected_count": selected_count}
+    return result
+
+
+def _apply_interest_quality(request, candidates, itinerary, coverage) -> None:
+    interests = _interest_coverage(request, candidates, itinerary)
+    coverage["interest_coverage"] = interests
+    missing = [key for key, value in interests.items() if value["status"] in {"not_confirmed", "not_scheduled"}]
+    if not missing:
+        return
+    reasons = coverage.setdefault("quality_reasons", [])
+    if "requested_interest_missing" not in reasons:
+        reasons.append("requested_interest_missing")
+    if itinerary is None:
+        return
+    coverage["quality_status"] = "partial"
+    # Quality is mutable after editing. Keep it in the separately recomputed
+    # report, not in user-owned tips that must be preserved verbatim on edit.
+
+
+def evaluate_saved_city_quality(request, candidates, itinerary, prior=None) -> dict:
+    """Recount a validated saved/edited route without rerunning discovery/AI.
+
+    Call after the ordinary city-context and itinerary validation. Prior search
+    counters do not describe an edit: retain only the allowlisted discovery
+    snapshot, and never attribute current free days to old weather/budget.
+    Neither the request, the pool nor the itinerary is modified.
+    """
+    from generation_quality import safe_coverage
+
+    if (request.destination_kind != "city" or itinerary.city_schedule is not True
+            or not isinstance(candidates, (list, tuple)) or not 1 <= len(candidates) <= 24
+            or len(itinerary.days) != request.days_count):
+        raise ValueError("Нужны проверенный городской календарь и связанный набор мест.")
+    known = {item.place_query for item in candidates}
+    selected = {item.place_query for day in itinerary.days for item in day.items if item.kind == "attraction"}
+    if selected - known:
+        raise ValueError("Посещения не связаны с проверенным набором мест.")
+    program_days = sum(day.day_mode == "program" and any(item.kind == "attraction" for item in day.items)
+                       for day in itinerary.days)
+    free_days = request.days_count - program_days
+    coverage = {
+        "requested_days": request.days_count, "program_days": program_days, "free_days": free_days,
+        "confirmed_candidates": len(candidates), "selected_unique_visits": len(selected),
+        "quality_status": "insufficient_data" if not program_days else "partial" if free_days else "complete",
+        "quality_reasons": ["incomplete_calendar"] if free_days else [],
+        "interest_coverage": _interest_coverage(request, candidates, itinerary),
+    }
+    if any(item["status"] in {"not_confirmed", "not_scheduled"}
+           for item in coverage["interest_coverage"].values()):
+        coverage["quality_reasons"].append("requested_interest_missing")
+        if program_days:
+            coverage["quality_status"] = "partial"
+    discovery = safe_coverage(prior).get("discovery")
+    if discovery:
+        coverage["discovery"] = discovery
+    return coverage
 
 
 def _incompatible_same_day_pairs(candidates) -> list[dict]:
     """Expose the existing spread rule without asking the model to do geodesy.
 
-    The canonical map pool is already bounded to 18 records: at most 153
+    The canonical map pool is already bounded to 24 records: at most 276
     comparisons. This is straight-line separation, not a route or travel time.
     Input records/identities are not modified or removed.
     """
@@ -151,6 +270,13 @@ def generate_city_itinerary(request: TripRequest, *, max_attempts: int = 3,
 
     def result(itinerary=None, problems=(), *, city_map_context=None,
                status="unknown", coverage=None):
+        report = dict(coverage or {})
+        if problems or itinerary is None:
+            report["quality_status"] = "insufficient_data"
+        elif "quality_status" not in report:
+            report["quality_status"] = ("partial" if any(day.day_mode == "free" for day in itinerary.days)
+                                        else "complete")
+        report.setdefault("quality_reasons", [])
         return planner.PlanResult(
             itinerary=itinerary if itinerary is not None else
                       Itinerary(title="Маршрут пока не составлен", summary="", days=[], tips=[]),
@@ -159,7 +285,7 @@ def generate_city_itinerary(request: TripRequest, *, max_attempts: int = 3,
             weather=weather, weather_text=weather_text,
             city_map_context=city_map_context,
             generation_status=status,
-            generation_coverage={**dict(coverage or {}), **({"discovery": dict(discovery)} if discovery else {})},
+            generation_coverage={**report, **({"discovery": dict(discovery)} if discovery else {})},
         )
 
     try:
@@ -187,6 +313,7 @@ def generate_city_itinerary(request: TripRequest, *, max_attempts: int = 3,
         selected = select_city_preferences(
             request, pool.candidates, memory_context=planner._prepare_memory_context(memory_context),
             completion=bounded_completion,
+            allow_depth_repair=max_attempts - counts["calls"] >= 2,
         )
         if selected.problems:
             return result(problems=selected.problems, status=selected.status)
@@ -194,20 +321,39 @@ def generate_city_itinerary(request: TripRequest, *, max_attempts: int = 3,
         blocked_places = planner._load_blocked_places(request.destination)
         required_shopping = ([item.candidate_id for item in selected.candidates if is_shopping_candidate(item)]
                              if shopping_preference(request) == "requested" else [])
+        from city_candidates import candidate_categories
+        requested = set(request.interest_categories) - {"main_sights", "water_trips"}
+        if shopping_preference(request) == "excluded":
+            requested.discard("shopping_malls")
+        groups = {category: [item.candidate_id for item in selected.candidates
+                             if category in candidate_categories(item)] for category in requested}
+        groups = {key: identifiers for key, identifiers in groups.items() if identifiers}
         built = build_deterministic_city_itinerary(
             request, selected.candidates, rainy_dates, resolved_city=center,
             blocked_places=blocked_places, candidate_priority=selected.candidate_priority,
             required_any_of_ids=required_shopping,
+            required_category_groups=groups,
         )
         built.coverage.update(discovered_candidates=len(pool.candidates),
                               preference_candidates=len(selected.candidates))
+        built.coverage.update(selected.diagnostics)
+        if selected.diagnostics.get("selection_depth_shortfall"):
+            # The original map pool met the planning-volume bound; the curated
+            # subset did not. Do not misattribute this to insufficient discovery.
+            reasons = [code for code in built.coverage.get("quality_reasons", [])
+                       if code != "insufficient_confirmed_places"]
+            built.coverage["quality_reasons"] = reasons
+            if "selection_depth_shortfall" not in reasons:
+                reasons.append("selection_depth_shortfall")
+            if selected.diagnostics.get("selection_repair_status") == "failed":
+                reasons.append("selection_repair_failed")
+        _apply_interest_quality(request, pool.candidates, built.itinerary, built.coverage)
         if built.itinerary is None or built.problems:
             return result(built.itinerary, built.problems, status=built.status,
                           coverage=built.coverage)
         itinerary = built.itinerary
-        for warning in getattr(selected, "warnings", ()):
-            if warning not in itinerary.tips:
-                itinerary.tips.append(warning)
+        # Missing selected interests are disclosed by the current quality
+        # report. Do not freeze a selection-time warning in editable tips.
         if discovery["warning_count"] or discovery["rejected_count"]:
             itinerary.tips.append(DISCOVERY_WARNING)
         records = {candidate.place_query: candidate.record for candidate in pool.candidates}

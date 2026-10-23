@@ -19,6 +19,7 @@ import db
 import access_control
 import access_guard
 from cover_prompts import COVER_DISCLOSURE, build_cover_prompt
+from cover_subjects import select_saved_cover_subject
 import yandex_art
 
 
@@ -35,6 +36,7 @@ MESSAGES = {
     "busy": "Обложки уже создаются. Новый запрос не запущен и лимит не потрачен.",
     "limit": "Дневной лимит иллюстраций исчерпан. Маршрут доступен без обложки.",
     "destination": "Для обложки нужны однозначные название направления и страна. Маршрут доступен без неё.",
+    "no_verified_subject": "В сохранённом маршруте пока нет подтверждённой достопримечательности для обложки. Используется нейтральное оформление; платная генерация не запускается.",
 }
 _FILE_NAME = re.compile(r"[0-9a-f]{32}\.(?:jpg|png)\Z")
 _REVIEW_LABEL = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}\Z")
@@ -120,7 +122,8 @@ def _owned_trip(conn, tg_id, account_key, trip_id):
     if not isinstance(account_key, str) or not account_key:
         raise CoverNotFoundError("Поездка не найдена.")
     row = conn.execute(
-        "SELECT t.id,t.destination,t.start_date,t.end_date FROM trips t JOIN users u ON u.tg_id=t.tg_id "
+        "SELECT t.id,t.destination,t.start_date,t.end_date,t.request_json,t.itinerary_json "
+        "FROM trips t JOIN users u ON u.tg_id=t.tg_id "
         "WHERE t.id=? AND t.tg_id=? AND u.account_key=? AND u.deletion_token=''",
         (trip_id, tg_id, account_key),
     ).fetchone()
@@ -143,7 +146,15 @@ def _prompt_for(trip):
     else:
         destination, country = (part.strip() for part in label.rsplit(",", 1))
     try:
-        return build_cover_prompt(destination, country, trip["start_date"], trip["end_date"])
+        prompt = build_cover_prompt(destination, country, trip["start_date"], trip["end_date"])
+        if prompt.generation_allowed:
+            return prompt
+        subject = select_saved_cover_subject(
+            trip["request_json"], trip["itinerary_json"], destination=destination, country=country,
+            start_date=trip["start_date"], end_date=trip["end_date"],
+        )
+        return (build_cover_prompt(destination, country, trip["start_date"], trip["end_date"], subject=subject)
+                if subject is not None else prompt)
     except ValueError:
         raise CoverDestinationError(MESSAGES["destination"]) from None
 
@@ -244,10 +255,20 @@ class TripCovers:
 
     def get_status(self, tg_id, account_key, trip_id):
         with db.connect() as conn:
-            _owned_trip(conn, tg_id, account_key, trip_id)
+            trip = _owned_trip(conn, tg_id, account_key, trip_id)
             row = conn.execute("SELECT * FROM trip_covers WHERE trip_id=? AND account_key=?",
                                (trip_id, account_key)).fetchone()
+        if row is None and enabled():
+            try:
+                if not _prompt_for(trip).generation_allowed:
+                    return self._no_subject_status()
+            except CoverDestinationError:
+                return self._no_subject_status()
         return self._status(row)
+
+    def _no_subject_status(self):
+        return {**self._status(), "available": False, "reason": "no_verified_subject",
+                "message": MESSAGES["no_verified_subject"]}
 
     def set_hidden(self, tg_id, account_key, trip_id, hidden):
         """Change presentation only: preserve the receipt, image and paid quota."""
@@ -373,9 +394,11 @@ class TripCovers:
                         return self._status(old)
                     if not enabled():
                         return self._status()
+                    prompt = _prompt_for(trip)
+                    if not prompt.generation_allowed:
+                        return self._no_subject_status()
                     if self.executor is None or self.closing:
                         raise CoverBusyError(MESSAGES["busy"])
-                    prompt = _prompt_for(trip)
                     digest = hashlib.sha256((prompt.cache_key + "\n" + yandex_art.configured_model_uri()).encode()).hexdigest()
                     active = conn.execute("SELECT COUNT(*) FROM trip_covers WHERE status IN ('queued','running')").fetchone()[0]
                     if active >= MAX_ACTIVE:

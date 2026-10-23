@@ -124,7 +124,7 @@ def _selected_program_schema(canonical_schema: dict, program_day_numbers: list[i
 
 
 def _candidate_pool(candidates: list[CityCandidate], canonical_days: dict[str, dict]) -> dict:
-    if not isinstance(candidates, list) or not candidates:
+    if not isinstance(candidates, list) or not 1 <= len(candidates) <= 24:
         raise ValueError("Нужен непустой серверный список кандидатов")
     pool = {}
     for candidate in candidates:

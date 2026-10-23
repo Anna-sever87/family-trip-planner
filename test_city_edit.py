@@ -140,6 +140,26 @@ class CityEditTests(unittest.TestCase):
         self.assertEqual(result.days[0].items[0].title, "Музей древней культуры")
         self.assertEqual(result.program_report.selected_unique_visits, 4)
 
+    def test_twenty_four_candidate_context_edits_last_candidate_and_rejects_twenty_five(self):
+        from city_deterministic import build_deterministic_city_itinerary
+        from test_city_deterministic import candidates as make_candidates, request as make_request, CENTER
+
+        request, pool = make_request(3), make_candidates(24)
+        original = build_deterministic_city_itinerary(request, pool[:4], resolved_city=CENTER).itinerary
+        context = context_for((request, original, pool, CENTER))
+        self.assertEqual(len(context.candidates), 24)
+        self.assertEqual(len(context.allowed_candidates), 22)  # Other day's two visits stay immutable.
+        wire = wire_for(context)
+        wire["day_1"]["attractions"][0]["candidate_id"] = pool[-1].candidate_id
+        wire["day_1"]["attractions"][1]["time"] = "11:00"  # Keep a reserve for the changed location.
+        result = decode(wire, context)
+        self.assertEqual(validate_city_edit(result, context, blocked_places=[]), [])
+        self.assertIn(pool[-1].place_query, {item.place_query for item in result.days[0].items})
+        self.assertEqual([day.model_dump() for day in result.days[1:]],
+                         [day.model_dump() for day in original.days[1:]])
+        with self.assertRaises(ValueError):
+            context_for((request, original, make_candidates(25), CENTER))
+
     def test_existing_free_day_can_stay_free_with_only_time_change(self):
         context = context_for(fixture(), 3)
         wire = wire_for(context)

@@ -33,7 +33,9 @@ class CityWebEditContextTests(unittest.TestCase):
         self.stack.enter_context(patch.object(web_service, "city_candidates_enabled", return_value=False))
         self.req = web_service._normalized_trip_request(request(2))
         self.pool = candidates(6)
-        built = build_deterministic_city_itinerary(self.req, self.pool, resolved_city=CENTER)
+        # Preserve two unused alternatives deliberately. Enrichment now uses
+        # every feasible candidate supplied to the initial scheduler.
+        built = build_deterministic_city_itinerary(self.req, self.pool[:4], resolved_city=CENTER)
         self.assertEqual(built.problems, [])
         self.original = built.itinerary
         self.snapshot = city_context.attach_city_presentation(

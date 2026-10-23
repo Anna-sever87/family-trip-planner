@@ -16,6 +16,7 @@ import memory as vector_memory
 import access_guard
 import reminders
 import city_context
+import generation_quality
 from anketa import MAX_TRIP_DAYS, PACES
 from checklist import build_checklist
 from city_rollout import CITY_MVP_DISCLOSURE, city_candidates_enabled, city_deterministic_enabled
@@ -625,6 +626,8 @@ def get_trip_detail(tg_id: int, trip_id: int) -> Dict[str, Any]:
         "edit_scope_note": city_context.CITY_EDIT_NOTE if itinerary.city_schedule else "",
         "weather_text": str(trip.get("request", {}).get("weather_text", "")),
         "itinerary": public_itinerary,
+        "generation_quality": generation_quality.public_quality(
+            trip.get("request", {}).get(generation_quality.KEY), itinerary),
         "budget": {
             "currency": request.currency,
             "limit": request.budget,
@@ -766,6 +769,8 @@ def create_trip(tg_id: int, request: TripRequest, *, expected_account_key: Optio
         request_dict = normalized.model_dump()
         request_dict["weather_text"] = result.weather_text
         request_dict["weather"] = result.weather
+        request_dict[generation_quality.KEY] = generation_quality.safe_coverage(
+            getattr(result, "generation_coverage", None))
         if getattr(result.itinerary, "city_schedule", False) is True:
             context = getattr(result, "city_map_context", None)
             try:
@@ -897,10 +902,19 @@ def edit_trip_day(
         request_dict["weather_text"] = result.weather_text
         request_dict["weather"] = result.weather
 
+        # An edit must not retain stale completeness from the previous plan.
+        request_dict[generation_quality.KEY] = generation_quality.safe_coverage(
+            getattr(result, "generation_coverage", None))
+
         if getattr(current_itinerary, "city_schedule", False) is True:
             try:
                 request_dict[city_context.CONTEXT_KEY] = city_context.validate_city_edit_context(
                     city_map_context, getattr(result, "city_map_context", None), request, result.itinerary)
+                from city_planner import evaluate_saved_city_quality
+                updated_candidates, _ = city_context.load_city_context(request_dict[city_context.CONTEXT_KEY], request)
+                request_dict[generation_quality.KEY] = generation_quality.safe_coverage(evaluate_saved_city_quality(
+                    request, updated_candidates, result.itinerary,
+                    trip["request"].get(generation_quality.KEY)))
             except ValueError as error:
                 raise EditRejectedError([city_context.CONTEXT_ERROR]) from error
 

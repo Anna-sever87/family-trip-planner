@@ -38,7 +38,7 @@ def candidates(count=6, *, kind="museum", separation=0.0001):
         values.append(CityCandidate(
             candidate_id=f"osm-node-{101 + index}", title=title, place_query=query, area="Тестгород",
             record=dict(lat=55.0, lon=83.0 + separation * index, name=query, provider="osm",
-                        osm_type="node", osm_id=101 + index, type=kind,
+                        osm_type="node", osm_id=101 + index, category="tourism", type=kind,
                         address={"city": "Тестгород", "country": "Россия", "country_code": "ru"})))
     return values
 
@@ -346,7 +346,8 @@ class DeterministicCityTests(unittest.TestCase):
         priority = [pool[3].candidate_id, pool[2].candidate_id]
         result = self.build(req, pool, candidate_priority=priority)
         self.assert_valid(result, req, pool)
-        self.assertEqual(result.coverage["selected_ids_by_day"]["1"], priority)
+        self.assertEqual(result.coverage["selected_ids_by_day"]["1"][:2], priority)
+        self.assertEqual(result.coverage["selected_unique_visits"], 4)
 
     def test_six_place_mixed_pool_honestly_covers_two_of_five_requested_days(self):
         req = request(5, start_time="10:00", end_time="18:00", budget=70000,
@@ -360,14 +361,14 @@ class DeterministicCityTests(unittest.TestCase):
         self.assertEqual((result.coverage["program_days"], result.coverage["free_days"]), (2, 3))
         self.assertEqual(result.coverage["daily_program_target_minutes"], 180)
         self.assertEqual(result.coverage["meal_reserve_total"], 7000)
-        self.assertEqual(result.coverage["selected_unique_visits"], 5)
+        self.assertEqual(result.coverage["selected_unique_visits"], 6)
 
     def test_rich_eighteen_place_pool_covers_five_long_adult_days(self):
         req, pool = request(5, start_time="08:00", end_time="21:00"), candidates(18)
         result = self.build(req, pool)
         self.assert_valid(result, req, pool)
         self.assertEqual(result.coverage["program_days"], 5)
-        self.assertEqual(result.coverage["selected_unique_visits"], 15)
+        self.assertEqual(result.coverage["selected_unique_visits"], 18)
         self.assertLessEqual(result.coverage["states_explored"], engine.MAX_SEARCH_STATES)
 
     def test_conflicting_early_windows_do_not_starve_sixteen_other_visits(self):
@@ -383,6 +384,127 @@ class DeterministicCityTests(unittest.TestCase):
         self.assertEqual(first.coverage["program_days"], 5)
         self.assertEqual(first.coverage, reversed_result.coverage)
         self.assertLessEqual(first.coverage["states_explored"], engine.MAX_SEARCH_STATES)
+
+    def test_three_museums_for_seven_days_are_partial_and_third_visit_is_not_discarded(self):
+        req = request(7, start_time="11:00", end_time="20:00", budget=100000,
+                      travel_cost=10000, lodging_cost=35000)
+        pool = candidates(3)
+        result = self.build(req, pool)
+        self.assert_valid(result, req, pool)
+        self.assertEqual(result.coverage["quality_status"], "partial")
+        self.assertEqual((result.coverage["program_days"], result.coverage["free_days"]), (1, 6))
+        self.assertEqual(result.coverage["selected_unique_visits"], 3)
+        self.assertEqual(result.coverage["enrichment_visits"], 1)
+        self.assertEqual([item.duration_min for item in visits(result.itinerary)], [90, 90, 90])
+        self.assertEqual(result.coverage["quality_reasons"], ["incomplete_calendar", "insufficient_confirmed_places"])
+        self.assertNotIn("1 из 7", result.itinerary.summary)
+        self.assertEqual(result.itinerary.program_report.selected_unique_visits, 3)
+
+    def test_rich_pool_gives_complete_seven_day_program(self):
+        req, pool = request(7, start_time="10:00", end_time="18:00"), candidates(18)
+        result = self.build(req, pool)
+        self.assert_valid(result, req, pool)
+        self.assertEqual(result.coverage["quality_status"], "complete")
+        self.assertEqual(result.coverage["quality_reasons"], [])
+        self.assertEqual((result.coverage["program_days"], result.coverage["free_days"]), (7, 0))
+        self.assertEqual(result.coverage["selected_unique_visits"], 18)
+
+    def test_seventeen_independent_visits_reach_six_day_bound_without_searching_for_impossible_seventh(self):
+        req, pool = request(7, start_time="11:00", end_time="20:00"), candidates(17)
+        for index, item in enumerate(pool[8:], 1):
+            item.title = f"Городской театр номер {index}"
+            item.place_query = f"{item.title}, Тестгород, Россия"
+            item.record.update(name=item.place_query, category="amenity", type="theatre")
+        short_first = [item.candidate_id for item in pool[8:]] + [item.candidate_id for item in pool[:8]]
+        for priority in (None, short_first):
+            with self.subTest(priority=bool(priority)):
+                result = self.build(req, pool, candidate_priority=priority)
+                self.assert_valid(result, req, pool)
+                self.assertEqual(sum(item.duration_min for item in visits(result.itinerary)), 1125)
+                self.assertEqual(result.coverage["daily_program_target_minutes"], 180)
+                self.assertEqual((result.coverage["program_days"], result.coverage["free_days"]), (6, 1))
+                self.assertEqual(result.coverage["quality_status"], "partial")
+                self.assertEqual(result.coverage["selected_unique_visits"], 17)
+                self.assertTrue(result.coverage["search_complete"])
+                self.assertLess(result.coverage["states_explored"], 20000)
+                if priority:
+                    self.assertEqual(result.coverage["selected_ids_by_day"]["1"][:4], short_first[:4])
+
+    def test_partial_upper_bound_uses_family_target_and_does_not_override_rain_or_exact_dates(self):
+        req, pool = request(7, start_time="11:00", end_time="20:00", children_ages=[5]), candidates(6)
+        chosen = options(pool, cost=0)
+        dates = [(date.fromisoformat(req.start_date) + timedelta(days=index)).isoformat() for index in range(1, 7)]
+        for index, day_date in enumerate(dates):
+            chosen[index] = replace(chosen[index], indoor=None if index == 0 else True,
+                                    allowed_dates=(day_date,), opening_windows=(
+                                        {"date": day_date, "start": "11:00", "end": "12:30", "basis": "source"},))
+        result = self.build(req, pool, chosen_options=chosen, rainy=dates[1:])
+        self.assert_valid(result, req, pool, dates[1:])
+        self.assertEqual(result.coverage["daily_program_target_minutes"], 90)
+        self.assertEqual(result.coverage["program_day_numbers"], [2, 3, 4, 5, 6, 7])
+        self.assertEqual(result.coverage["quality_status"], "partial")
+        self.assertEqual(result.itinerary.days[0].day_mode, "free")
+        self.assertFalse(next(item for item in result.itinerary.days[1].items if item.kind == "attraction").indoor)
+        self.assertLessEqual(result.coverage["states_explored"], 20000)
+
+    def test_twenty_four_pool_covers_seven_short_and_long_days_with_original_budget(self):
+        for start_time, end_time, target in (("10:00", "18:00", 180), ("08:00", "21:00", 240)):
+            with self.subTest(target=target):
+                req = request(7, start_time=start_time, end_time=end_time)
+                pool = candidates(24)
+                result = self.build(req, pool)
+                self.assert_valid(result, req, pool)
+                self.assertEqual(result.coverage["quality_status"], "complete")
+                self.assertEqual(result.coverage["program_days"], 7)
+                self.assertEqual(result.coverage["daily_program_target_minutes"], target)
+                self.assertLessEqual(result.coverage["states_explored"], 20000)
+        self.assertEqual(self.build(pool=candidates(25)).status, "invalid_request")
+
+    def test_spanning_tree_bound_avoids_impossible_transfers_without_search(self):
+        req, pool = request(1), candidates(4)
+        prepared = [engine._checked_option(value, option, [req.start_date])
+                    for value, option in zip(pool, options(pool))]
+        distances = {(left, right): 1 for left in range(4) for right in range(left + 1, 4)}
+        counter = engine._Budget(20000)
+        result = engine._template((0, 1, 2, 3), prepared, (((600, 1080),),) * 4,
+                                  600, 1080, distances, counter, 15000)
+        self.assertIsNone(result)
+        self.assertEqual(counter.used, 0)
+
+    def test_legacy_twenty_four_pool_reserves_states_for_calendar(self):
+        from city_coverage import build_city_program_witness
+        result = build_city_program_witness(request(7, start_time="08:00", end_time="21:00"), candidates(24))
+        self.assertEqual(len(result.program_day_numbers), 7)
+        self.assertLessEqual(result.states_explored, 20000)
+
+    def test_partial_rain_calendar_reports_missing_indoor_evidence_not_missing_city(self):
+        req, pool = request(7, start_time="10:00", end_time="18:00"), candidates(18)
+        rainy = [(date.fromisoformat(req.start_date) + timedelta(days=index)).isoformat() for index in range(6)]
+        result = self.build(req, pool, rainy=rainy)
+        self.assert_valid(result, req, pool, rainy)
+        self.assertEqual(result.coverage["quality_status"], "partial")
+        self.assertIn("indoor_evidence_missing", result.coverage["quality_reasons"])
+        self.assertNotIn("insufficient_confirmed_places", result.coverage["quality_reasons"])
+        self.assertEqual(result.coverage["program_days"], 1)
+
+    def test_enrichment_does_not_override_budget_or_source_windows(self):
+        req, pool = request(1, start_time="09:00", end_time="19:00", budget=3500), candidates(3)
+        chosen = options(pool, cost=1000)
+        result = self.build(req, pool, chosen_options=chosen)
+        self.assert_valid(result, req, pool)
+        self.assertEqual(result.coverage["selected_unique_visits"], 2)
+        chosen = options(pool, cost=0)
+        chosen[-1] = replace(chosen[-1], opening_windows=(
+            {"date": req.start_date, "start": "09:00", "end": "09:30", "basis": "source"},))
+        result = self.build(req, pool, chosen_options=chosen)
+        self.assert_valid(result, req, pool)
+        self.assertEqual(result.coverage["selected_unique_visits"], 2)
+
+    def test_no_program_is_explicitly_insufficient_quality(self):
+        result = self.build(pool=candidates(1))
+        self.assertIsNone(result.itinerary)
+        self.assertEqual(result.coverage["quality_status"], "insufficient_data")
+        self.assertIn("no_feasible_program_day", result.coverage["quality_reasons"])
 
     def test_group_budget_is_bounded_and_reports_unfinished_search(self):
         req, pool = request(1, start_time="09:07", end_time="14:07"), candidates(2, separation=0)
@@ -444,8 +566,69 @@ class DeterministicCityTests(unittest.TestCase):
             self.assert_valid(result, req, pool)
             self.assertFalse(result.coverage["requested_category_satisfied"])
             self.assertIn("requested_shopping_not_scheduled", result.reasons)
-            self.assertTrue(any("торговый центр не вошёл" in tip for tip in result.itinerary.tips))
+            self.assertIn("requested_interest_missing", result.coverage["quality_reasons"])
+            self.assertFalse(any("торговый центр не вошёл" in tip for tip in result.itinerary.tips))
             self.assertEqual(result.coverage["program_days"], 1)
+
+    def test_requested_categories_survive_minimal_groups_and_child_visit_limit(self):
+        req, pool = request(1, children_ages=[2]), candidates(4)
+        pool[-1].record.update(category="tourism", type="zoo")
+        result = self.build(req, pool, required_category_groups={
+            "museums": [item.candidate_id for item in pool[:3]],
+            "zoos": [pool[-1].candidate_id]})
+        self.assert_valid(result, req, pool)
+        identifiers = result.coverage["selected_ids_by_day"]["1"]
+        self.assertEqual(len(identifiers), 2)
+        self.assertIn(pool[-1].candidate_id, identifiers)
+        self.assertTrue(set(identifiers) & {item.candidate_id for item in pool[:3]})
+        self.assertLessEqual(result.coverage["states_explored"], 20000)
+
+    def test_twenty_four_mixed_visits_cover_seven_long_days_and_all_requested_categories(self):
+        req, pool = request(7, start_time="08:00", end_time="21:00"), candidates(24)
+        for index in (18, 19):
+            pool[index].record.update(category="tourism", type="zoo")
+        for index in (20, 21):
+            pool[index].record.update(category="amenity", type="theatre")
+        for index in (22, 23):
+            pool[index].record.update(category="shop", type="mall")
+        groups = {"museums": [item.candidate_id for item in pool[:18]],
+                  "zoos": [item.candidate_id for item in pool[18:20]],
+                  "theatre": [item.candidate_id for item in pool[20:22]],
+                  "shopping_malls": [item.candidate_id for item in pool[22:]]}
+        result = self.build(req, pool, required_category_groups=groups,
+                            required_any_of_ids=groups["shopping_malls"])
+        self.assert_valid(result, req, pool)
+        self.assertEqual((result.coverage["quality_status"], result.coverage["program_days"]), ("complete", 7))
+        chosen = {identifier for values in result.coverage["selected_ids_by_day"].values() for identifier in values}
+        self.assertEqual(len(chosen), 24)
+        for identifiers in groups.values():
+            self.assertTrue(chosen & set(identifiers))
+        # The checked full incumbent reaches the day/category upper bound;
+        # do not spend 20k states proving it before retaining spare visits.
+        self.assertLess(result.coverage["states_explored"], 1000)
+
+    def test_diverse_incumbent_cannot_override_known_age_dates_or_budget(self):
+        req, pool = request(1, children_ages=[8], budget=5000), candidates(4)
+        pool[2].record.update(category="tourism", type="zoo")
+        pool[3].record.update(category="shop", type="mall")
+        groups = {"museums": [item.candidate_id for item in pool[:2]],
+                  "zoos": [pool[2].candidate_id], "shopping_malls": [pool[3].candidate_id]}
+        for changes in ({"children_allowed": False}, {"allowed_dates": ()}):
+            chosen = options(pool, cost=0)
+            chosen[2] = replace(chosen[2], duration_min=45, **changes)
+            chosen[3] = replace(chosen[3], estimated_cost=10000)
+            result = self.build(req, pool, chosen_options=chosen, required_category_groups=groups,
+                                required_any_of_ids=groups["shopping_malls"])
+            self.assert_valid(result, req, pool)
+            selected = set(result.coverage["selected_ids_by_day"]["1"])
+            self.assertFalse(selected & {pool[2].candidate_id, pool[3].candidate_id})
+            self.assertFalse(result.coverage["requested_category_satisfied"])
+
+    def test_category_groups_cannot_authorize_unknown_or_duplicate_ids(self):
+        for groups in ({"zoos": ["invented"]}, {"zoos": ["osm-node-101"] * 2},
+                       {"unknown": ["osm-node-101"]}, {"zoos": "osm-node-101"}):
+            with self.subTest(groups=groups):
+                self.assertEqual(self.build(required_category_groups=groups).status, "invalid_request")
 
     def test_required_candidate_ids_cannot_invent_or_repeat_a_place(self):
         for identifiers in (["osm-node-99999"], [True], ["osm-node-101"] * 2, "osm-node-101"):
@@ -533,7 +716,7 @@ class DeterministicCityTests(unittest.TestCase):
             result = engine.build_deterministic_city_itinerary(req, pool, rainy, resolved_city=center)
             self.assert_valid(result, req, pool, rainy)
         self.assertEqual((result.coverage["program_days"], result.coverage["free_days"]), (1, 4))
-        self.assertEqual([item.duration_min for item in visits(result.itinerary)], [90])
+        self.assertEqual([item.duration_min for item in visits(result.itinerary)], [90, 30])
         self.assertIn("выставочных залах", visits(result.itinerary)[0].description)
         notes = " ".join(result.itinerary.tips)
         self.assertIn("https://baotanghdh.vn/khu-trung-bay-hdh/", notes)

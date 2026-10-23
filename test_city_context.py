@@ -38,6 +38,16 @@ class CityContextTests(unittest.TestCase):
         pool[0].record["lat"] = 0
         self.assertEqual(payload["candidates"][0]["record"]["lat"], 55.0)
 
+    def test_twenty_four_candidates_roundtrip_but_twenty_five_fail_closed(self):
+        from test_city_deterministic import candidates
+        self.pool = candidates(24)
+        payload = self.build()
+        loaded, _ = city_context.load_city_context(payload, self.request)
+        self.assertEqual(len(loaded), 24)
+        self.pool = candidates(25)
+        with self.assertRaises(ValueError):
+            self.build()
+
     def test_foreign_or_modified_request_is_rejected(self):
         for changes in ({"destination": "Другой город, Россия"}, {"budget": 31000},
                         {"children_ages": [5]}, {"start_date": "2099-10-27"}):

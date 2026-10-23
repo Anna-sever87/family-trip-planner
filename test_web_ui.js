@@ -774,6 +774,29 @@ test("coverage and unknown prices remain visible outside the optional long notes
   assert.match(text, /нулевой резерв не означает бесплатный вход/);
 });
 
+test("partial quality and missing interests stay visible outside collapsed notes", () => {
+  const ui = browser();
+  ui.state.trip = freeDaysDetail();
+  ui.state.trip.generation_quality = { quality_status: "partial", program_days: 1, requested_days: 7,
+    reason_texts: ["Найденного подтверждённого набора недостаточно."],
+    interest_texts: ["зоопарки: не удалось подтвердить места"] };
+  ui.context.renderTripNotes();
+  const text = ui.element("tripNotes").children.filter((child) => child.tagName !== "DETAILS").map(elementText).join(" ");
+  assert.match(text, /Программа составлена частично/);
+  assert.match(text, /Дней с программой: 1 из 7/);
+  assert.match(text, /зоопарки: не удалось подтвердить/);
+});
+
+test("memory ranking limitation is visible in the quality panel", () => {
+  const ui = browser();
+  ui.state.trip = freeDaysDetail();
+  ui.state.trip.generation_quality = { quality_status: "complete", program_days: 7, requested_days: 7,
+    memory_note: "Память влияет на приоритеты. Обязательные ограничения укажите в текущей анкете." };
+  ui.context.renderTripNotes();
+  const text = ui.element("tripNotes").children.filter((child) => child.tagName !== "DETAILS").map(elementText).join(" ");
+  assert.match(text, /Обязательные ограничения укажите в текущей анкете/);
+});
+
 test("real rendering distinguishes verified program coverage from explicitly free calendar days", () => {
   const ui = browser();
   ui.context.renderTrip = ui.originalRenderTrip;
@@ -1316,6 +1339,22 @@ test("disabled, failed and interrupted covers do not expose paid retry; read fai
   await settleCovers();
   assert.deepEqual(calls, ["GET", "GET"]);
   assert.equal(ui.timers.size, 0);
+});
+
+test("unconfirmed cover subject explains free fallback without a paid action", async () => {
+  const ui = coverBrowser();
+  const methods = [];
+  ui.context.api = async (_path, options) => {
+    methods.push(options?.method || "GET");
+    return { ...coverPayload("empty", false), reason: "no_verified_subject" };
+  };
+  ui.context.startTripCoverView();
+  await settleCovers();
+  const text = elementText(ui.element("tripCoverControls"));
+  assert.match(text, /Пока нет подтверждённой достопримечательности/);
+  assert.match(text, /платная генерация не запускается/);
+  assert.ok(!text.includes("Создать ИИ-обложку"));
+  assert.deepEqual(methods, ["GET"]);
 });
 
 test("card cover hydration uses at most 24 reads with concurrency three and session cache", async () => {

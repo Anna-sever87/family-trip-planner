@@ -139,6 +139,60 @@ class TripCoversTests(unittest.TestCase):
         self.submission.assert_not_called()
         self.assertEqual(self.rows("cover_attempts"), [])
 
+    def test_unknown_city_without_attraction_is_free_readonly_and_not_reserved(self):
+        trip = self.save_trip(destination="Новосибирск, Россия")
+        before = Path(db.DB_PATH).read_bytes()
+        for _ in range(3):
+            state = self.status(trip)
+            self.assertEqual(state["status"], "empty")
+            self.assertFalse(state["available"])
+            self.assertEqual(state["reason"], "no_verified_subject")
+        self.assertEqual(Path(db.DB_PATH).read_bytes(), before)
+        for _ in range(3):
+            self.assertEqual(self.submit(trip), state)
+        self.submission.assert_not_called()
+        self.assertEqual(self.manager.executor.calls, [])
+        self.assertEqual(self.rows("cover_attempts"), [])
+        self.assertEqual(self.rows("trip_covers"), [])
+
+    def test_unknown_city_uses_owned_saved_attraction_in_actual_provider_prompt(self):
+        from test_cover_subjects import saved_fixture
+        envelope, itinerary = saved_fixture()
+        trip = db.save_trip(1, envelope, itinerary)
+        self.assertTrue(self.status(trip)["available"])
+        self.assertEqual(self.submit(trip)["status"], "queued")
+        self.manager.executor.run_next()
+        self.submission.assert_called_once()
+        prompt = self.submission.call_args.args[0]
+        self.assertEqual(prompt.template_key, "saved-attraction")
+        self.assertIn("Театр Северный", prompt.provider_prompt)
+        self.assertIn("Камера на земле", prompt.provider_prompt)
+        self.assertNotIn("private-family-information", prompt.provider_prompt + prompt.user_prompt)
+        self.assertNotIn("Private or AI prose", prompt.provider_prompt + prompt.user_prompt)
+        self.assertEqual(self.status(trip)["status"], "ready")
+        self.assertEqual(len(self.rows("cover_attempts")), 1)
+
+    def test_foreign_owner_cannot_use_or_inspect_saved_cover_subject(self):
+        from test_cover_subjects import saved_fixture
+        envelope, itinerary = saved_fixture()
+        trip = db.save_trip(2, envelope, itinerary)
+        for method in (self.submit, self.status):
+            with self.assertRaises(covers.CoverNotFoundError):
+                method(trip)
+        self.submission.assert_not_called()
+        self.assertEqual(self.rows("cover_attempts"), [])
+
+    def test_existing_unknown_city_receipt_not_replaced_or_revalidated(self):
+        self.complete()
+        old = self.rows("trip_covers")
+        with db.connect() as conn:
+            conn.execute("UPDATE trips SET destination='Новосибирск, Россия' WHERE id=?", (self.trip,))
+        with patch.object(covers, "_prompt_for", side_effect=AssertionError("Do not change old receipt")):
+            self.assertEqual(self.status()["status"], "ready")
+            self.assertEqual(self.submit()["status"], "ready")
+        self.assertEqual(self.rows("trip_covers"), old)
+        self.submission.assert_called_once()
+
     def test_repeated_and_concurrent_submit_is_one_receipt_one_attempt(self):
         with ThreadPoolExecutor(max_workers=6) as callers:
             results = list(callers.map(lambda _: self.submit(), range(12)))

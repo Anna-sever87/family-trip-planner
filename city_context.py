@@ -83,7 +83,7 @@ def build_city_context(request: TripRequest, candidates, resolved_city: dict, *,
     if pool_scope not in {"generation_pool", "existing_visits_rechecked"}:
         raise ValueError(CONTEXT_ERROR)
     center = _resolved_center(resolved_city, request)
-    if not isinstance(candidates, (list, tuple)) or not 1 <= len(candidates) <= 18:
+    if not isinstance(candidates, (list, tuple)) or not 1 <= len(candidates) <= 24:
         raise ValueError(CONTEXT_ERROR)
     prepared, identifiers, queries = [], set(), set()
     for candidate in candidates:
@@ -119,7 +119,7 @@ def load_city_context(payload: dict, request: TripRequest) -> tuple[list[CityCan
                 or not isinstance(payload["captured_at"], str)
                 or datetime.fromisoformat(payload["captured_at"]).tzinfo is None
                 or not isinstance(payload["candidates"], list)
-                or not 1 <= len(payload["candidates"]) <= 18
+                or not 1 <= len(payload["candidates"]) <= 24
                 or len(json.dumps(payload, ensure_ascii=False, allow_nan=False)) > 200_000):
             raise ValueError(CONTEXT_ERROR)
         if "presentation" in payload:
@@ -234,14 +234,14 @@ def recover_city_context(request: TripRequest, itinerary: Itinerary, *,
 
     Only existing exact queries are searched. Existing coordinates/names must
     equal the independently returned observation. No candidate is invented or
-    inferred from a coordinate URL. At most 18 names / 36 map attempts.
+    inferred from a coordinate URL. At most 24 names / 36 map attempts.
     """
     from weather import find_city
 
     if itinerary.city_schedule is not True or itinerary.source_schedule:
         raise ValueError(CONTEXT_ERROR)
     visits = [item for day in itinerary.days for item in day.items if item.kind == "attraction"]
-    if not 1 <= len(visits) <= 18 or len({item.place_query for item in visits}) != len(visits):
+    if not 1 <= len(visits) <= 24 or len({item.place_query for item in visits}) != len(visits):
         raise ValueError(CONTEXT_ERROR)
     center = _resolved_center(resolved_city if resolved_city is not None else find_city(request.destination), request)
     lookup = lookup or _lookup

@@ -162,7 +162,7 @@ QUESTIONS = {
     "pace": "Какой темп поездки?",
     "wishes": (
         "Пожелания: что любите, "
-        "чего избегаете? "
+        "чего избегаете? Все обязательные ограничения укажите сейчас: память прошлых поездок помогает с приоритетами, но не заменяет текущую анкету. "
         "Если нет, напишите «-»"
     ),
 }
@@ -3056,6 +3056,9 @@ def generation_job(
             "weather"
         ] = result.weather
 
+        from generation_quality import KEY as quality_key, safe_coverage
+        request_dict[quality_key] = safe_coverage(getattr(result, "generation_coverage", None))
+
         if getattr(result.itinerary, "city_schedule", False) is True:
             context = getattr(result, "city_map_context", None)
             try:
@@ -3110,6 +3113,14 @@ def generation_job(
             chat_id,
             text,
         )
+
+        if request_dict[quality_key].get("quality_status") == "partial":
+            bot.send_message(chat_id, "Программа составлена частично: не все дни или выбранные интересы удалось заполнить. "
+                             "Это ограничение подбора, а не доказательство отсутствия других мест в городе.")
+
+        from generation_quality import memory_note
+        if note := memory_note(request_dict[quality_key]):
+            bot.send_message(chat_id, note)
 
         edit_hint = f"Изменить день: /edit {trip_id} 1 текст. "
         if getattr(result.itinerary, "city_schedule", False) is True:
@@ -3282,12 +3293,19 @@ def edit_generation_job(
             result.weather
         )
 
+        from generation_quality import KEY as quality_key, safe_coverage
+        request_dict[quality_key] = safe_coverage(getattr(result, "generation_coverage", None))
+
         if is_city or getattr(result.itinerary, "city_schedule", False) is True:
             context = getattr(result, "city_map_context", None)
             try:
                 if getattr(result.itinerary, "city_schedule", False) is not True or type(context) is not dict:
                     raise ValueError(CONTEXT_ERROR)
                 context = validate_city_edit_context(city_map_context, context, request, result.itinerary)
+                from city_planner import evaluate_saved_city_quality
+                updated_candidates, _ = load_city_context(context, request)
+                request_dict[quality_key] = safe_coverage(evaluate_saved_city_quality(
+                    request, updated_candidates, result.itinerary, trip["request"].get(quality_key)))
             except (ValueError, TypeError):
                 bot.send_message(chat_id, "Изменения не сохранены: не удалось проверить данные карты. Старый маршрут сохранён без изменений.")
                 return

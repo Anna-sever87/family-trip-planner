@@ -26,7 +26,7 @@ from places import MAX_DAY_SPREAD_KM, distance_km, verify_itinerary
 from pricing import minimum_meal_cost
 from program_coverage import rebuild_program_report
 from rules import check_city_radius, check_program_depth, check_rules, check_verified_place_duplicates, program_depth_target
-from schemas import Itinerary, ItineraryDay, ItineraryItem, TripRequest
+from schemas import INTEREST_LABELS, Itinerary, ItineraryDay, ItineraryItem, TripRequest
 
 
 MAX_SEARCH_STATES = 20_000
@@ -203,6 +203,21 @@ def _template(indices, visits, windows, start, end, distances, counter, group_li
     # of the actual schedule or a source of visitor conditions.
     if sum(visits[index].duration for index in indices) + 120 > end - start:
         return None
+    # A spanning tree is a lower bound on any visiting order's total reserved
+    # transfers, even with the non-metric zero-distance threshold. This rules
+    # out an overfull group without enumerating every lunch/permutation.
+    connected, remaining = {indices[0]}, set(indices[1:])
+    minimum_transfer = 0
+    while remaining:
+        edges = ((0 if distances[tuple(sorted((left, right)))] <= .03 else
+                  max(TRANSFER_RESERVE_MINUTES, math.ceil(distances[tuple(sorted((left, right)))])), right)
+                 for left in connected for right in remaining)
+        cost, reached = min(edges)
+        minimum_transfer += cost
+        connected.add(reached)
+        remaining.remove(reached)
+    if sum(visits[index].duration for index in indices) + 120 + minimum_transfer > end - start:
+        return None
     by_index = dict(zip(indices, windows))
     earliest_finish = {}
     for index in indices:
@@ -293,6 +308,7 @@ def _make_day(number, day_date, template, visits, meal_cost):
 def build_deterministic_city_itinerary(
     request: TripRequest, candidates, rainy_dates=(), *, resolved_city: dict,
     options=None, blocked_places=None, candidate_priority=None, required_any_of_ids=(),
+    required_category_groups=None,
     max_states: int = MAX_SEARCH_STATES,
 ) -> DeterministicCityResult:
     """Construct one fully checked calendar or return no itinerary.
@@ -305,10 +321,13 @@ def build_deterministic_city_itinerary(
     from planner import _blocked_place_problems, _max_attractions_for_request
     from city_visit_options import check_city_visit_conditions, visit_option
 
-    coverage = {"schema_version": 1, "reason_codes": [], "exclusions": []}
+    coverage = {"schema_version": 1, "reason_codes": [], "exclusions": [],
+                "quality_status": "insufficient_data", "quality_reasons": []}
 
     def failure(status, message, code):
         coverage["reason_codes"] = list(dict.fromkeys([*coverage["reason_codes"], code]))
+        coverage["quality_status"] = "insufficient_data"
+        coverage["quality_reasons"] = list(dict.fromkeys([*coverage["quality_reasons"], code]))
         return DeterministicCityResult(None, [message], status, deepcopy(coverage))
 
     try:
@@ -322,7 +341,7 @@ def build_deterministic_city_itinerary(
                 or len(set(rainy_dates)) != len(rainy_dates)):
             raise ValueError("Дождливые даты должны быть уникальными датами поездки.")
         rainy = set(rainy_dates)
-        if not isinstance(candidates, (list, tuple)) or len(candidates) > 18:
+        if not isinstance(candidates, (list, tuple)) or len(candidates) > 24:
             raise ValueError("Нужен ограниченный серверный набор кандидатов.")
         coverage.update(requested_days=len(dates), confirmed_candidates=len(candidates))
         if not candidates:
@@ -336,6 +355,14 @@ def build_deterministic_city_itinerary(
                 or set(required_any_of_ids) - {candidate.candidate_id for candidate in prepared}):
             raise ValueError("Обязательная группа должна содержать уникальные проверенные ID.")
         required_ids = set(required_any_of_ids)
+        category_groups = {} if required_category_groups is None else required_category_groups
+        known_ids = {candidate.candidate_id for candidate in prepared}
+        if (not isinstance(category_groups, dict) or len(category_groups) > len(INTEREST_LABELS)
+                or any(key not in INTEREST_LABELS or not isinstance(values, (tuple, list))
+                       or any(type(value) is not str for value in values)
+                       or len(set(values)) != len(values) or set(values) - known_ids
+                       for key, values in category_groups.items())):
+            raise ValueError("Группы интересов должны ссылаться только на проверенные уникальные ID.")
         priority = () if candidate_priority is None else candidate_priority
         if (not isinstance(priority, (tuple, list)) or len(priority) > len(prepared)
                 or any(type(value) is not str for value in priority)
@@ -405,19 +432,127 @@ def build_deterministic_city_itinerary(
     counter = _Budget(max_states)
     required_mask = sum(1 << index for index, visit in enumerate(visits)
                         if visit.candidate.candidate_id in required_ids)
+    preference_masks = {sum(1 << index for index, visit in enumerate(visits)
+                            if visit.candidate.candidate_id in identifiers)
+                        for identifiers in category_groups.values()}
+    preference_masks.add(required_mask)
+    preference_masks.discard(0)
+    preference_masks = tuple(sorted(preference_masks))
     # Keep an explicit portion for choosing a calendar from already found days.
     group_limit = max(1, max_states * 3 // 4)
     templates = [[] for _ in dates]
+    template_masks = [set() for _ in dates]
     template_cache = {}
+    budget_groups_rejected = 0
+
+    def capacity_upper_bound(day_index, used):
+        # Every program day needs this request's actual family/adult target
+        # and at least one unique visit. Ignore weather, windows, transfers and
+        # price here deliberately: relaxing them is optimistic, never a reason
+        # to discard a feasible calendar or invent an indoor/date condition.
+        unused = [visit for index, visit in enumerate(visits) if not used & (1 << index)]
+        return min(len(dates) - day_index, len(unused), sum(visit.duration for visit in unused) // target)
+
+    def diverse_incumbent():
+        """Find a small checked incumbent before exhaustive minimal groups.
+
+        Shorter visits from rare categories may need four-visit days, while
+        thousands of museum-only triples occur earlier in combinations(). A
+        bounded constructive pass gives those categories a fair chance without
+        enlarging the state budget or making this heuristic a feasibility proof.
+        """
+        if len(preference_masks) < 2:
+            return ()
+        seed_limit = min(group_limit, max(1, max_states // 20))
+        chosen, remaining, calendar = 0, extra_budget, []
+        for day_index, day_date in enumerate(dates):
+            available = [index for index, visit in enumerate(visits)
+                         if not chosen & (1 << index)
+                         and visit.cost_cents <= remaining
+                         and (visit.option.allowed_dates is None or day_date in visit.option.allowed_dates)
+                         and (not visit.windows or visit.windows.get(day_date))]
+            best = None
+            seen_groups = set()
+            for offset in range(min(8, len(available))):
+                group, group_mask, duration, cost = [], chosen, 0, 0
+                rotated = available[offset:] + available[:offset]
+                while len(group) < max_visits and duration < target:
+                    eligible = [index for index in rotated if index not in group
+                                and cost + visits[index].cost_cents <= remaining
+                                and all(distances[tuple(sorted((index, previous)))] <= MAX_DAY_SPREAD_KM
+                                        for previous in group)]
+                    if not eligible:
+                        break
+                    index = min(eligible, key=lambda value: (
+                        -bool(visits[value].option.indoor is True) if day_date in rainy else 0,
+                        -bool((1 << value) & required_mask) if not group_mask & required_mask else 0,
+                        -sum(bool((1 << value) & mask) for mask in preference_masks if not group_mask & mask),
+                        -visits[value].duration, rotated.index(value)))
+                    group.append(index)
+                    group_mask |= 1 << index
+                    duration += visits[index].duration
+                    cost += visits[index].cost_cents
+                indices = tuple(sorted(group))
+                if (not indices or duration < target or indices in seen_groups
+                        or day_date in rainy
+                        and sum(visits[index].option.indoor is True for index in indices) * 2 < len(indices)):
+                    continue
+                seen_groups.add(indices)
+                if not counter.take(seed_limit):
+                    return tuple(calendar)
+                windows = tuple(visits[index].windows.get(day_date, ()) if visits[index].windows
+                                else ((start, end),) for index in indices)
+                template = _template(indices, visits, windows, start, end, distances, counter,
+                                     seed_limit, attempt_limit=MAX_GROUP_SEARCH_STATES)
+                if template is None:
+                    continue
+                def seed_score(value):
+                    return (bool(value.mask & required_mask) if not chosen & required_mask else False,
+                            sum(bool(value.mask & mask) for mask in preference_masks if not chosen & mask),
+                            -len(value.order), -value.cost_cents)
+                if best is None or seed_score(template) > seed_score(best):
+                    best = template
+            if best is not None:
+                calendar.append((day_index, best))
+                chosen |= best.mask
+                remaining -= best.cost_cents
+        return tuple(calendar)
+
+    seeded_calendar = diverse_incumbent()
+    seeded_mask = 0
+    for day_index, template in seeded_calendar:
+        seeded_mask |= template.mask
+        templates[day_index].append(template)
+        template_masks[day_index].add(template.mask)
+    # A checked calendar reaching the optimistic day bound and all requested
+    # feasible categories already meets the objective. The bound can be below
+    # the requested duration: that result remains partial, never called complete.
+    seed_optimal = (len(seeded_calendar) == capacity_upper_bound(0, 0)
+                    and all(seeded_mask & mask for mask in preference_masks))
+
+    def dominated(day_index, mask):
+        # Groups contain at most five visits: inspecting their <=31 subsets
+        # is much cheaper than scanning thousands of existing templates.
+        subset = mask
+        while subset:
+            if (subset in template_masks[day_index]
+                    and all(not mask & preference or subset & preference for preference in preference_masks)):
+                return True
+            subset = (subset - 1) & mask
+        return False
     for size in range(1, min(max_visits, len(visits)) + 1):
+        if seed_optimal:
+            break
         if counter.used >= group_limit:
             counter.limited = True
             break
         for indices in combinations(range(len(visits)), size):
             if not counter.take(group_limit):
                 break
+            if sum(visits[index].cost_cents for index in indices) > extra_budget:
+                budget_groups_rejected += 1
+                continue
             if (sum(visits[index].duration for index in indices) < target
-                    or sum(visits[index].cost_cents for index in indices) > extra_budget
                     or any(distances[pair] > MAX_DAY_SPREAD_KM for pair in combinations(indices, 2))):
                 continue
             mask = sum(1 << index for index in indices)
@@ -426,9 +561,7 @@ def build_deterministic_city_itinerary(
                 if (day_date in rainy and indoors * 2 < size
                         or any(visits[index].option.allowed_dates is not None
                                and day_date not in visits[index].option.allowed_dates for index in indices)
-                        or any(template.mask & mask == template.mask
-                               and (not mask & required_mask or template.mask & required_mask)
-                               for template in templates[day_index])):
+                        or dominated(day_index, mask)):
                     continue
                 windows = tuple(visits[index].windows.get(day_date, ()) if visits[index].windows
                                 else ((start, end),) for index in indices)
@@ -441,26 +574,35 @@ def build_deterministic_city_itinerary(
                                                     attempt_limit=MAX_GROUP_SEARCH_STATES)
                 if template_cache[key] is not None:
                     templates[day_index].append(template_cache[key])
+                    template_masks[day_index].add(mask)
                 if counter.used >= group_limit:
                     break
 
     def order_key(template, rainy_day):
         indoor_count = sum(visits[index].option.indoor is True for index in template.order)
+        # Reserve capacity for other dates before optimizing soft preference.
+        # Equal-depth groups still preserve the supplied AI ordering;
+        # extra useful visits are added only after packing the maximum days.
+        compact = (sum(visits[index].duration for index in template.order) - target, len(template.order))
         if priority:
             # Ranking is only an optimization among feasible groups. It never
             # expands a pool, creates visitor facts or defeats the budget/rain.
-            return (0 if rainy_day else indoor_count, tuple(sorted(template.order)),
-                    template.cost_cents, len(template.order))
-        return (0 if rainy_day else indoor_count, template.cost_cents, len(template.order), template.mask)
+            return (0 if rainy_day else indoor_count, compact[0],
+                    tuple(sorted(template.order)), compact[1], template.cost_cents)
+        return (0 if rainy_day else indoor_count, *compact, template.cost_cents, template.mask)
 
     for index in range(len(dates)):
         templates[index].sort(key=lambda value: order_key(value, dates[index] in rainy))
     memo = {}
     packing_required_mask = 0
-    feasible_required_mask = 0
+    feasible_visit_mask = 0
     for day_templates in templates:
         for template in day_templates:
-            feasible_required_mask |= template.mask & required_mask
+            feasible_visit_mask |= template.mask
+    feasible_preference_masks = tuple(mask & feasible_visit_mask for mask in preference_masks if mask & feasible_visit_mask)
+    feasible_required_mask = 0
+    for mask in feasible_preference_masks:
+        feasible_required_mask |= mask
 
     def score(calendar, used):
         selected_mask = used
@@ -468,7 +610,8 @@ def build_deterministic_city_itinerary(
             selected_mask |= template.mask
         # Never trade away a program day just to satisfy an interest. Among
         # equally complete calendars, retain an explicitly requested category.
-        return len(calendar), bool(required_mask and selected_mask & required_mask)
+        return (len(calendar), bool(required_mask and selected_mask & required_mask),
+                sum(bool(selected_mask & mask) for mask in preference_masks))
 
     def pack(day_index, used, remaining):
         if day_index == len(dates):
@@ -476,29 +619,38 @@ def build_deterministic_city_itinerary(
         key = (day_index, used)  # Nonnegative one-use costs make remaining a function of used.
         if key in memo:
             return memo[key]
+        upper_bound = capacity_upper_bound(day_index, used)
+        if not upper_bound:
+            return ()
         if not counter.take():
             return ()
         best = ()
         ordered = templates[day_index]
-        if packing_required_mask and not used & packing_required_mask:
-            ordered = sorted(ordered, key=lambda template: not bool(template.mask & packing_required_mask))
+        if packing_required_mask:
+            ordered = sorted(ordered, key=lambda template: (
+                -bool(template.mask & required_mask) if not used & required_mask else 0,
+                -sum(bool(template.mask & mask) for mask in feasible_preference_masks if not used & mask)))
         for template in ordered:
             if template.mask & used or template.cost_cents > remaining:
+                continue
+            if 1 + capacity_upper_bound(day_index + 1, used | template.mask) < len(best):
                 continue
             rest = pack(day_index + 1, used | template.mask, remaining - template.cost_cents)
             proposal = ((day_index, template),) + rest
             if score(proposal, used) > score(best, used):
                 best = proposal
-            if len(best) == len(dates) - day_index and (not packing_required_mask or score(best, used)[1]):
+            if len(best) == upper_bound and (not packing_required_mask
+                    or (not required_mask & feasible_visit_mask or score(best, used)[1])
+                    and score(best, used)[2] >= len(feasible_preference_masks)):
                 memo[key] = best
                 return best
             if counter.used >= max_states:
                 break
-        if counter.used < max_states:
+        if counter.used < max_states and capacity_upper_bound(day_index + 1, used) >= len(best):
             skipped = pack(day_index + 1, used, remaining)
             if score(skipped, used) > score(best, used):
                 best = skipped
-        else:
+        elif counter.used >= max_states:
             counter.limited = True
         memo[key] = best
         return best
@@ -507,18 +659,62 @@ def build_deterministic_city_itinerary(
     # requested category must not spend the bounded search on a worse calendar.
     # A second, category-first pass shares the same global counter and may only
     # replace that incumbent with an equal-or-better number of program days.
-    calendar = pack(0, 0, extra_budget)
-    if feasible_required_mask and not score(calendar, 0)[1] and counter.used < max_states:
+    calendar = seeded_calendar if seed_optimal else pack(0, 0, extra_budget)
+    if score(seeded_calendar, 0) > score(calendar, 0):
+        calendar = seeded_calendar
+    if (feasible_required_mask and (score(calendar, 0)[2] < len(feasible_preference_masks)
+            or required_mask & feasible_visit_mask and not score(calendar, 0)[1])
+            and counter.used < max_states):
         packing_required_mask = feasible_required_mask
         memo.clear()
         alternative = pack(0, 0, extra_budget)
         if score(alternative, 0) > score(calendar, 0):
             calendar = alternative
     selected = dict(calendar)
+    # Minimal groups preserve calendar capacity during packing. Once the day
+    # count is fixed, retain additional useful unique visits when they fit;
+    # never stretch a duration, fill a free day below target, or remove a day.
+    chosen = {index for template in selected.values() for index in template.order}
+    spent = sum(template.cost_cents for template in selected.values())
+    enrichment_count = 0
+    remaining_indices = set(range(len(visits))) - chosen
+    while remaining_indices:
+        chosen_mask = sum(1 << index for index in chosen)
+        extra = min(remaining_indices, key=lambda index: (
+            -sum(bool((1 << index) & mask) for mask in preference_masks if not chosen_mask & mask), index))
+        remaining_indices.remove(extra)
+        if counter.used >= max_states:
+            counter.limited = True
+            break
+        if spent + visits[extra].cost_cents > extra_budget:
+            continue
+        for day_index, original in sorted(selected.items()):
+            indices = tuple(sorted((*original.order, extra)))
+            if len(indices) > max_visits or any(distances[pair] > MAX_DAY_SPREAD_KM
+                                               for pair in combinations(indices, 2)):
+                continue
+            day_date = dates[day_index]
+            if (day_date in rainy and sum(visits[index].option.indoor is True for index in indices) * 2 < len(indices)
+                    or any(visits[index].option.allowed_dates is not None
+                           and day_date not in visits[index].option.allowed_dates for index in indices)):
+                continue
+            windows = tuple(visits[index].windows.get(day_date, ()) if visits[index].windows
+                            else ((start, end),) for index in indices)
+            if any(not allowed for allowed in windows):
+                continue
+            expanded = _template(indices, visits, windows, start, end, distances, counter,
+                                 max_states, attempt_limit=MAX_GROUP_SEARCH_STATES)
+            if expanded is not None:
+                selected[day_index] = expanded
+                chosen.add(extra)
+                spent += visits[extra].cost_cents
+                enrichment_count += 1
+                break
     coverage.update(states_explored=counter.used, search_complete=not counter.limited,
                     program_days=len(selected), free_days=len(dates) - len(selected),
                     available_day_templates=sum(map(len, templates)),
-                    group_search_limits=counter.group_limits)
+                    group_search_limits=counter.group_limits,
+                    enrichment_visits=enrichment_count)
     if counter.limited:
         coverage["reason_codes"].append("search_limit")
     if not selected:
@@ -526,6 +722,24 @@ def build_deterministic_city_itinerary(
                        "В пределах проверки не найдено ни одного полного дня с программой при исходных "
                        "датах, времени, бюджете и известных условиях. Посещения не растягивались; "
                        "это не утверждение, что других мест в городе нет.", "no_feasible_program_day")
+
+    coverage["quality_status"] = "complete" if len(selected) == len(dates) else "partial"
+    if len(selected) < len(dates):
+        quality_reasons = ["incomplete_calendar"]
+        if sum(visit.duration for visit in visits) < target * len(dates):
+            quality_reasons.append("insufficient_confirmed_places")
+        if (any(index not in selected and value in rainy for index, value in enumerate(dates))
+                and not any(visit.option.indoor is True for visit in visits)):
+            quality_reasons.append("indoor_evidence_missing")
+        if coverage["exclusions"] or any(visit.windows or visit.option.allowed_dates is not None for visit in visits):
+            quality_reasons.append("visit_constraints")
+        if budget_groups_rejected:
+            quality_reasons.append("budget_constraint")
+        if counter.limited:
+            quality_reasons.append("search_limit")
+        if len(quality_reasons) == 1:
+            quality_reasons.append("schedule_constraints")
+        coverage["quality_reasons"] = quality_reasons
 
     days = [_make_day(index + 1, value, selected[index], visits, meal_cents / 100) if index in selected
             else build_city_free_day(request, index + 1) for index, value in enumerate(dates)]
@@ -539,9 +753,11 @@ def build_deterministic_city_itinerary(
                     requested_category_satisfied=required_satisfied if required_ids else None)
     if required_ids and not required_satisfied:
         coverage["reason_codes"].append("requested_shopping_not_scheduled")
-        itinerary.tips.append(
-            "Запрошенный торговый центр не вошёл в найденную программу при исходных ограничениях "
-            "и лимите поиска. Его посещение не обещано; остальные подтверждённые посещения сохранены.")
+        coverage["quality_status"] = "partial"
+        if "requested_interest_missing" not in coverage["quality_reasons"]:
+            coverage["quality_reasons"].append("requested_interest_missing")
+        # The current coverage report carries this mutable outcome. A stored
+        # summary/tip would otherwise keep saying "missing" after a valid edit.
     itinerary.tips.extend(city_managed_tips(itinerary, prepared, request,
                                           options_by_id={visit.candidate.candidate_id: visit.option for visit in visits}))
     if counter.limited:
@@ -564,6 +780,8 @@ def build_deterministic_city_itinerary(
         problems = ["Некорректное серверное расписание."]
     if problems:
         coverage["reason_codes"].append("schedule_validation_failed")
+        coverage["quality_status"] = "insufficient_data"
+        coverage["quality_reasons"] = ["schedule_validation_failed"]
         return DeterministicCityResult(None, list(problems[:12]), "validation_error", coverage)
     coverage.update(program_day_numbers=[index + 1 for index in sorted(selected)],
                     selected_unique_visits=len(chosen),

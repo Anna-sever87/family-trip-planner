@@ -153,6 +153,20 @@ class WebServiceOutcomeTests(unittest.TestCase):
         self.save.assert_called_once()
         self.assert_finished(True)
 
+    def test_creation_persists_safe_quality_without_raw_diagnostics(self):
+        self.result.generation_coverage = {"quality_status": "partial", "discovery": {
+            "confirmed_candidates": 3, "raw_response": "private-secret"}}
+        web_service.create_trip(123, self.request)
+        quality = self.save.call_args.args[1]["generation_coverage"]
+        self.assertEqual(quality["quality_status"], "partial")
+        self.assertNotIn("raw_response", quality["discovery"])
+
+    def test_edit_does_not_retain_old_quality_audit(self):
+        self.trip["request"]["generation_coverage"] = {"quality_status": "complete", "program_days": 7}
+        self.result.generation_coverage = {"quality_status": "partial", "program_days": 1}
+        self.edit_day()
+        self.assertEqual(self.update.call_args.args[2]["generation_coverage"]["quality_status"], "partial")
+
     def test_edit_endpoint_distinguishes_postcommit_failure(self):
         self.detail.side_effect = RuntimeError("Detail unavailable")
 

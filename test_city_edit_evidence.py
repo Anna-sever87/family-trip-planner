@@ -29,7 +29,10 @@ class CityEditEvidenceTests(unittest.TestCase):
             self.addCleanup(mock.assert_not_called)
         self.req = request(2)
         self.pool = candidates(6)
-        result = build_deterministic_city_itinerary(self.req, self.pool, resolved_city=CENTER)
+        # Keep two unused verified alternatives for replacement. The improved
+        # constructor legitimately enriches a route with every supplied visit;
+        # edit tests must not rely on it silently discarding a spare candidate.
+        result = build_deterministic_city_itinerary(self.req, self.pool[:4], resolved_city=CENTER)
         self.assertEqual(result.problems, [])
         self.original = result.itinerary
         self.original.tips.insert(1, "Личное примечание, которое нельзя переписывать.")

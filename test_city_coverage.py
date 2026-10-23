@@ -265,7 +265,7 @@ class CityCoverageTests(unittest.TestCase):
             with self.subTest(limit=limit), self.assertRaises(ValueError):
                 build_city_program_witness(request(), self.pool(["museum"]), max_states=limit)
         with self.assertRaises(ValueError):
-            build_city_program_witness(request(), self.pool(["museum"] * 19))
+            build_city_program_witness(request(), self.pool(["museum"] * 25))
 
     def test_maximum_pool_is_bounded_and_does_not_reuse_ids(self):
         req = request().model_copy(update={"end_date": "2099-11-10"})

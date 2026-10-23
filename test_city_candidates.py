@@ -15,6 +15,7 @@ from unittest.mock import Mock, patch
 import httpx
 
 import city_candidates as candidates
+_REAL_MAP_HINTS = candidates._map_name_hints
 import destination_name_hints as name_hints
 import places
 import verified_map_places
@@ -53,6 +54,7 @@ def cached(raw):
 def response(records):
     value = Mock()
     value.json.return_value = records
+    value.content = b"[]"
     return value
 
 
@@ -71,6 +73,10 @@ class CityCandidateTests(unittest.TestCase):
         self.gate = self.patched(places, "_wait_for_turn", side_effect=lambda: nullcontext())
         self.get = self.patched(httpx, "get", return_value=response([record()]))
         self.hints = self.patched(candidates, "destination_name_hints", return_value=[])
+        # These tests isolate exact-name lookup. Category discovery has its own
+        # provider fixtures; enable it explicitly in the source-identity cases.
+        self.map_hints = self.patched(candidates, "_map_name_hints", return_value=[])
+        self.category_search = self.patched(candidates, "_category_search", return_value=[])
         self.completion = Mock(return_value=SimpleNamespace(text=json.dumps({"titles": [TITLE]}), input_tokens=11, output_tokens=17))
 
     def patched(self, owner, name, **kwargs):
@@ -201,15 +207,17 @@ class CityCandidateTests(unittest.TestCase):
         self.assertEqual(self.get.call_args.kwargs["params"]["q"], "Test Museum, VN")
 
     def test_local_spelling_does_not_allow_mismatching_other_entity_or_country(self):
-        center = {**CENTER, "name": "Test City", "country_code": "VN"}
+        center = {**CENTER, "name": "Test City", "country_code": "vn"}
         for provider_name, country in (("Entirely Different Museum", "vn"), ("Test Museum", "tr")):
             self.get.reset_mock()
             self.get.return_value = response([record(title=provider_name,
                 display_name=f"{provider_name}, Test City, {country.upper()}",
                 address={"city": "Test City", "country": country.upper(), "country_code": country})])
-            result = self.run_pool(["Test Museum"], center=center, destination="Test City, VN")
+            result = candidates.CityCandidateResult()
+            confirmed = candidates._lookup("Test Museum", "VN", center, result)
             with self.subTest(provider_name=provider_name, country=country):
-                self.assertFalse(result.candidates)
+                # An unrelated provider name never proves the requested alias.
+                self.assertIsNone(confirmed)
                 self.assertEqual((result.map_requests, self.get.call_count), (1, 1))
 
     def test_descriptive_zoo_is_not_a_named_candidate_but_specific_names_survive(self):
@@ -360,6 +368,7 @@ class CityCandidateTests(unittest.TestCase):
                 "tags": {"shop": "mall", "name": title, "opening_hours": "24/7", "fee": "no"}, **changes}
 
     def test_shopping_checkbox_discovers_source_names_then_independently_checks_same_map_id(self):
+        self.map_hints.side_effect = _REAL_MAP_HINTS
         title = "Северный пассаж"
         observed = record(title, category="shop", type="mall")
         self.get.side_effect = [self.shopping_response([self.mall_element(title)]), response([observed])]
@@ -371,8 +380,9 @@ class CityCandidateTests(unittest.TestCase):
         query = discovery.kwargs["params"]["data"]
         self.assertIn('["shop"~"^(mall|shopping_centre)$"]', query)
         self.assertIn("around:40000,52.0000000,105.0000000", query)
-        self.assertIn("out tags center 64", query)
-        self.assertEqual(self.get.call_args_list[1].kwargs["params"]["q"], f"{title}, Россия")
+        self.assertIn("out body center 24", query)
+        self.assertEqual(self.get.call_args_list[1].kwargs["params"]["osm_ids"], "N123")
+        self.assertEqual(self.get.call_args_list[1].args[0], candidates._MAP_LOOKUP_URL)
         self.assertNotIn("opening_hours", str(result.candidates[0].record))
         self.assertNotIn("fee", str(result.candidates[0].record))
         context = json.loads(self.completion.call_args.args[0][1]["content"])
@@ -389,6 +399,7 @@ class CityCandidateTests(unittest.TestCase):
                 self.assertEqual(self.get.call_args.args[0], places.NOMINATIM_URL)
 
     def test_shopping_discovery_does_not_accept_other_identity_type_country_or_remote_object(self):
+        self.map_hints.side_effect = _REAL_MAP_HINTS
         title = "Северный пассаж"
         base = record(title, category="shop", type="mall")
         bad = [dict(base, osm_id=999), dict(base, category="tourism", type="museum"),
@@ -402,6 +413,7 @@ class CityCandidateTests(unittest.TestCase):
                 self.assertEqual(result.map_requests, 2)
 
     def test_shopping_discovery_accepts_way_center_and_keeps_shopping_centre_type(self):
+        self.map_hints.side_effect = _REAL_MAP_HINTS
         title = "Северный пассаж"
         element = self.mall_element(title, type="way", center={"lat": 52.02, "lon": 105.03},
                                     tags={"shop": "shopping_centre", "name": title})
@@ -412,6 +424,7 @@ class CityCandidateTests(unittest.TestCase):
         self.assertEqual(result.candidates[0].candidate_id, "osm-way-123")
 
     def test_shopping_discovery_failures_are_bounded_and_do_not_claim_no_malls(self):
+        self.map_hints.side_effect = _REAL_MAP_HINTS
         for discovery in (httpx.ConnectTimeout("offline"), self.shopping_response([], remark="timeout"),
                           self.shopping_response([self.mall_element()] * 65)):
             with self.subTest(discovery=type(discovery).__name__):
@@ -422,6 +435,7 @@ class CityCandidateTests(unittest.TestCase):
                 self.assertEqual(result.usage["completion_calls"], 1)
 
     def test_shopping_discovery_skips_generic_remote_and_malformed_source_items(self):
+        self.map_hints.side_effect = _REAL_MAP_HINTS
         bad = [self.mall_element(title="Торговый центр"), self.mall_element(lat=True),
                self.mall_element(identifier=True), self.mall_element(lat=60.0),
                self.mall_element(tags={"shop": "supermarket", "name": "Северный магазин"}),
@@ -434,6 +448,7 @@ class CityCandidateTests(unittest.TestCase):
         self.assertTrue(result.warnings)
 
     def test_leading_period_in_source_name_is_not_ai_normalized_or_used_as_dictionary_key(self):
+        self.map_hints.side_effect = _REAL_MAP_HINTS
         title = ". Северный пассаж"
         self.get.side_effect = [self.shopping_response([self.mall_element(title)])]
         result = self.run_pool([], interest_categories=["shopping_malls"])
@@ -450,6 +465,7 @@ class CityCandidateTests(unittest.TestCase):
         self.get.assert_not_called()
 
     def test_shopping_lookup_does_not_reuse_unrelated_cached_object(self):
+        self.map_hints.side_effect = _REAL_MAP_HINTS
         title = "Северный пассаж"
         self.cache[title] = cached(record(title, identifier=999, category="shop", type="mall"))
         self.get.side_effect = [self.shopping_response([self.mall_element(title)]),
@@ -459,12 +475,16 @@ class CityCandidateTests(unittest.TestCase):
         self.assertEqual(result.map_requests, 2)
 
     def test_all_mall_candidates_do_not_expand_usable_pool_or_call_ai_when_full(self):
+        self.map_hints.side_effect = _REAL_MAP_HINTS
         elements = [self.mall_element(f"Северный пассаж {i}", i + 1) for i in range(4)]
         seeds = [f"Test Museum {i}" for i in range(10)]
         self.hints.return_value = [{"title": title, "source_url": "https://example.invalid/name"} for title in seeds]
         def get(url, **kwargs):
             if url == candidates._SHOPPING_DISCOVERY_URL:
                 return self.shopping_response(elements)
+            if url == candidates._MAP_LOOKUP_URL:
+                identifier = int(kwargs["params"]["osm_ids"][1:])
+                return response([record(f"Северный пассаж {identifier - 1}", identifier, category="shop", type="mall")])
             title = kwargs["params"]["q"].split(",", 1)[0]
             if title.startswith("Северный пассаж"):
                 return response([record(title, int(title.rsplit(" ", 1)[1]) + 1, category="shop", type="mall")])
@@ -476,6 +496,7 @@ class CityCandidateTests(unittest.TestCase):
         self.completion.assert_not_called()
 
     def test_shopping_discovery_limits_source_names_and_counts_send_in_total_36(self):
+        self.map_hints.side_effect = _REAL_MAP_HINTS
         elements = [self.mall_element(f"Северный пассаж {i}", i + 1) for i in range(8)]
         calls = 0
         def get(url, **kwargs):
@@ -489,9 +510,13 @@ class CityCandidateTests(unittest.TestCase):
                                interest_categories=["shopping_malls"])
         self.assertEqual((calls, result.map_requests), (36, 36))
         self.assertEqual(self.gate.call_count, 35)
-        mall_queries = {call.kwargs["params"]["q"] for call in self.get.call_args_list[1:]
-                        if "Северный пассаж" in call.kwargs["params"]["q"]}
+        mall_queries = {call.kwargs["params"]["osm_ids"] for call in self.get.call_args_list[1:]
+                        if "osm_ids" in call.kwargs["params"]}
+        # Only one source per category precedes AI. Remaining exact-ID work
+        # shares the same budget rather than exhausting it before AI runs.
         self.assertEqual(len(mall_queries), 4)
+        checked = json.loads(self.completion.call_args.args[0][1]["content"])
+        self.assertEqual(checked["remaining_name_slots"], 35)
         self.completion.assert_called_once()
 
     def test_rejected_raw_names_do_not_consume_usable_pool_capacity(self):
@@ -534,8 +559,10 @@ class CityCandidateTests(unittest.TestCase):
         context = json.loads(self.completion.call_args.args[0][1]["content"])
         self.assertEqual([hint["title"] for hint in context["source_name_hints"]], seeds[:9])
         self.assertEqual(context["remaining_name_slots"], 19)
-        self.assertEqual(result.diagnostics, {"attempted_names": 28, "name_limit": 28,
-                                             "usable_limit": 18, "limits_reached": ["name_limit"]})
+        self.assertEqual({key: result.diagnostics[key] for key in
+                          ("attempted_names", "name_limit", "usable_limit", "limits_reached")},
+                         {"attempted_names": 28, "name_limit": 28,
+                          "usable_limit": 18, "limits_reached": ["name_limit"]})
 
     def test_source_network_failures_cannot_exhaust_http_before_ai_supplement(self):
         seeds = [f"Source Museum {index}" for index in range(36)]
@@ -573,6 +600,7 @@ class CityCandidateTests(unittest.TestCase):
         self.completion.assert_called_once()
 
     def test_ekaterinburg_public_name_hints_survive_overpass_502_and_leave_room_for_museum(self):
+        self.map_hints.side_effect = _REAL_MAP_HINTS
         city = "Екатеринбург"
         titles = ["Гринвич", "Пассаж"]
         museum = "Тестовый художественный музей"
@@ -721,8 +749,8 @@ class CityCandidateTests(unittest.TestCase):
         for proposal, official, kind in cases:
             with self.subTest(proposal=proposal, official=official, kind=kind):
                 self.get.return_value = response([record(official, type=kind)])
-                result = self.run_pool([proposal])
-                self.assertFalse(result.candidates)
+                result = candidates.CityCandidateResult()
+                self.assertIsNone(candidates._lookup(proposal, "Россия", dict(CENTER, country_code="ru"), result))
                 self.assertLessEqual(result.map_requests, 1)
 
     def test_park_name_normalization_keeps_country_and_radius_guards(self):
@@ -744,10 +772,58 @@ class CityCandidateTests(unittest.TestCase):
         for raw in bad_records:
             with self.subTest(raw=raw):
                 self.get.return_value = response([raw])
-                result = self.run_pool()
-                self.assertEqual(result.candidates, [])
+                result = candidates.CityCandidateResult()
+                self.assertIsNone(candidates._lookup(TITLE, "Россия", dict(CENTER, country_code="ru"), result))
                 self.assertEqual(result.map_requests, 1)
                 self.assertEqual(result.rejected[0]["reason"], "limited_search_unconfirmed")
+
+    def test_failed_ai_alias_can_add_separate_provider_named_osm_observation(self):
+        official = "Музей истории Северного края имени Н. А. Белова"
+        self.get.return_value = response([record(official, 987)])
+        result = self.run_pool(["Музей Северного края"])
+        self.assertEqual([item.title for item in result.candidates], [official])
+        self.assertEqual(result.candidates[0].candidate_id, "osm-node-987")
+        self.assertEqual(result.candidates[0].record["namedetails"], {"name": official})
+        self.assertEqual(result.rejected[0]["title"], "Музей Северного края")
+        self.assertIn("name_mismatch", result.rejected[0]["record_reasons"])
+        self.assertEqual(result.diagnostics["source_alternatives_confirmed"], 1)
+        self.assertEqual(result.diagnostics["attempted_names"], 2)
+        self.assertEqual(result.map_requests, 1)
+        self.assertFalse(places._place_matches_query("Музей Северного края, Россия", result.candidates[0].record))
+
+    def test_provider_alternative_keeps_country_radius_type_name_and_identity_guards(self):
+        other = "Музей истории Северного края"
+        cases = ({"address": {"city": AREA, "country": "Турция", "country_code": "tr"}},
+                 {"lat": "60"}, {"osm_id": None}, {"type": "hotel"},
+                 {"namedetails": None}, {"category": "amenity", "type": "theatre"})
+        for changes in cases:
+            with self.subTest(changes=changes):
+                self.get.return_value = response([record(other, **changes)])
+                result = self.run_pool([TITLE])
+                self.assertFalse(result.candidates)
+                self.assertEqual(result.diagnostics["source_alternatives_confirmed"], 0)
+                self.assertEqual(result.map_requests, 1)
+
+    def test_provider_alternative_does_not_substitute_source_hint_or_exact_identity(self):
+        self.get.return_value = response([record("Другой подтверждённый музей", 987)])
+        self.hints.return_value = [{"title": TITLE, "source_url": "https://example.invalid/name"}]
+        self.assertFalse(self.run_pool([]).candidates)
+        alternatives = []
+        result = candidates.CityCandidateResult()
+        self.assertIsNone(candidates._lookup(TITLE, "Россия", dict(CENTER, country_code="ru"), result,
+            source_identity=("osm", "node", 123), source_alternatives=alternatives,
+            alternative_categories=["museums"]))
+        self.assertEqual(alternatives, [])
+
+    def test_provider_alternatives_share_name_capacity_and_deduplicate_actual_identity(self):
+        self.get.return_value = response([record(f"Музей Северный {i}", i + 1) for i in range(5)])
+        result = self.run_pool([f"Музей Южный {i}" for i in range(36)], days=7)
+        self.assertEqual(len(result.candidates), 5)
+        self.assertEqual(result.diagnostics["source_alternatives_confirmed"], 5)
+        self.assertEqual(result.diagnostics["attempted_names"], 36)
+        self.assertEqual(result.map_requests, 31)
+        self.assertLessEqual(result.map_requests, 36)
+        self.completion.assert_called_once()
 
     def test_strict_circle_rejects_outside_40_even_inside_viewbox(self):
         self.get.return_value = response([record(lat="52.3", lon="105.5")])

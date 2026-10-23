@@ -94,7 +94,21 @@ class CitySourceFirstTests(unittest.TestCase):
             with self.subTest(reason=reason):
                 self.get.return_value = response(values)
                 result = self.run_pool()
-                self.assertEqual(result.status, "insufficient_data")
+                if reason == "name_mismatch":
+                    # The requested alias still failed. A separate, genuinely
+                    # named OSM observation may enter only under its own name.
+                    self.assertEqual(result.status, "success")
+                    self.assertEqual([item.title for item in result.candidates], ["Другой музей"])
+                    self.assertEqual(result.candidates[0].candidate_id, "osm-node-123")
+                    self.assertNotEqual(result.candidates[0].title, TITLE)
+                    self.assertEqual(result.rejected[0]["title"], TITLE)
+                    self.assertIsNone(candidates._canonical_record(TITLE,
+                        candidates._from_provider(values[0]), dict(CENTER, country_code="ru")))
+                    self.assertEqual(result.diagnostics["source_alternatives_confirmed"], 1)
+                else:
+                    self.assertEqual(result.status, "insufficient_data")
+                    self.assertFalse(result.candidates)
+                    self.assertEqual(result.diagnostics["source_alternatives_confirmed"], 0)
                 self.assertEqual(result.rejected[0]["detail"], detail)
                 self.assertEqual(result.rejected[0]["record_reasons"], reason)
 

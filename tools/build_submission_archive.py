@@ -30,7 +30,7 @@ RUNTIME_MODULES = (
     "planner.py", "pricing.py", "program_coverage.py", "prompts.py", "regional_routing.py", "regional_skeleton.py", "reminders.py", "rules.py",
     "schemas.py", "source_planning.py", "visit_facts.py", "verified_map_places.py", "web_app.py", "web_auth.py", "web_service.py", "weather.py",
     "yandex_ai.py", "city_visit_estimates.py", "city_rollout.py", "city_context.py", "city_edit.py", "city_edit_service.py",
-    "city_deterministic.py", "city_visit_options.py", "city_preferences.py", "city_evidence.py", "generation_jobs.py", "cover_prompts.py",
+    "city_deterministic.py", "city_visit_options.py", "city_preferences.py", "city_evidence.py", "generation_jobs.py", "generation_quality.py", "cover_prompts.py", "cover_subjects.py",
     "yandex_art.py", "trip_covers.py",
 )
 SUPPORT_FILES = (

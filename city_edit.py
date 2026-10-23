@@ -135,8 +135,8 @@ def prepare_city_edit(
     rain = tuple(rainy_dates)
     if any(type(value) is not str or value not in calendar for value in rain) or len(set(rain)) != len(rain):
         raise ValueError("Дождливые даты должны быть уникальными датами поездки.")
-    if not isinstance(candidates, list) or not 1 <= len(candidates) <= 18:
-        raise ValueError("Нужен ограниченный серверный набор из 1–18 кандидатов.")
+    if not isinstance(candidates, list) or not 1 <= len(candidates) <= 24:
+        raise ValueError("Нужен ограниченный серверный набор из 1–24 кандидатов.")
     center = deepcopy(resolved_city)
     center["country_code"] = _country_code(center["country_code"])
     prepared, records, by_query, identifiers = [], {}, {}, set()

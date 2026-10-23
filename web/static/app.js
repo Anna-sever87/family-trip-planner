@@ -135,6 +135,7 @@ function coverStatusValue(payload, tripId) {
     throw new Error("Не удалось проверить состояние обложки.");
   }
   return { status: payload.status, available: payload.available, hidden: payload.hidden === true,
+    reason: payload.reason === "no_verified_subject" ? "no_verified_subject" : "",
     image_url: payload.status === "ready" && payload.hidden !== true ? payload.image_url : null };
 }
 
@@ -176,6 +177,7 @@ function renderCoverControls(session) {
   const text = session.error || (session.visibilityBusy ? "Сохраняю видимость обложки. Новая генерация не запускается…"
     : session.posting ? "Отправляю один запрос на создание обложки…"
     : status?.status === "ready" && status.hidden ? "ИИ-обложка скрыта. Её можно вернуть без новой генерации."
+    : status?.reason === "no_verified_subject" ? "Пока нет подтверждённой достопримечательности для обложки. Используется нейтральное оформление; платная генерация не запускается."
     : status ? COVER_COPY[status.status] : "Проверяю сохранённую обложку…");
   panel.append(node("p", "cover-status", text));
   if (status?.status === "ready") {
@@ -857,7 +859,26 @@ function renderTripNotes() {
     ? itinerary.tips.filter((tip) => typeof tip === "string" && tip.trim()) : [];
   const coverage = programCoverageText(itinerary);
   const unpricedNote = cityUnpricedVisitNote(itinerary);
-  panel.hidden = !summary && !tips.length && !coverage && !unpricedNote;
+  const quality = state.trip.generation_quality;
+  const hasQuality = quality && ["complete", "partial", "insufficient_data"].includes(quality.quality_status);
+  panel.hidden = !summary && !tips.length && !coverage && !unpricedNote && !hasQuality;
+  if (hasQuality) {
+    const disclosure = node("section", "program-coverage");
+    const labels = { complete: "Программа составлена на все дни", partial: "Программа составлена частично",
+      insufficient_data: "Недостаточно подтверждённых данных" };
+    disclosure.append(node("h2", "", labels[quality.quality_status]));
+    if ([quality.program_days, quality.requested_days].every(Number.isInteger)) {
+      disclosure.append(node("p", "", `Дней с программой: ${quality.program_days} из ${quality.requested_days}.`));
+    }
+    for (const value of [...(Array.isArray(quality.reason_texts) ? quality.reason_texts : []),
+      ...(Array.isArray(quality.interest_texts) ? quality.interest_texts : [])].slice(0, 20)) {
+      if (typeof value === "string") disclosure.append(node("p", "", value));
+    }
+    if (typeof quality.memory_note === "string" && quality.memory_note) {
+      disclosure.append(node("p", "budget-note", quality.memory_note));
+    }
+    panel.append(disclosure);
+  }
   if (coverage) {
     const disclosure = node("div", "program-coverage");
     disclosure.append(node("h2", "", "Программа и свободные дни"), node("p", "", coverage));

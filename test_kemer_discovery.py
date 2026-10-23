@@ -76,7 +76,8 @@ class KemerDiscoveryTests(unittest.TestCase):
 
     @staticmethod
     def response(records):
-        return SimpleNamespace(raise_for_status=lambda: None, json=lambda: deepcopy(records))
+        return SimpleNamespace(raise_for_status=lambda: None, json=lambda: deepcopy(records),
+                               content=json.dumps(records, ensure_ascii=False).encode("utf-8"))
 
     def test_empty_exact_search_is_discovery_miss_not_rejection_by_scope(self):
         result = CityCandidateResult()
@@ -158,6 +159,11 @@ class KemerDiscoveryTests(unittest.TestCase):
             observations = {"Phaselis, Турция": [PHASELIS], "Folklorik Yörük Parkı, Турция": [YORUK],
                             "Olbia, Турция": [OLBIA]}
             def get(_url, *, params, **_kwargs):
+                if _url == city_candidates._SHOPPING_DISCOVERY_URL:
+                    # This replay isolates the historical name evidence, not
+                    # present-day category availability. The real primary and
+                    # reserve stages still run and count their HTTP sends.
+                    return self.response({"elements": []})
                 self.assertEqual(params["countrycodes"], "tr")
                 self.assertEqual(params["bounded"], 1)
                 return self.response(observations.get(params["q"], []))
@@ -166,7 +172,11 @@ class KemerDiscoveryTests(unittest.TestCase):
                     patch("places._save_cache", side_effect=AssertionError("No cache writes")):
                 result = city_candidates.ground_city_candidates(request, CENTER,
                     completion=lambda *_args, **_kwargs: proposals, allow_partial_program=True)
-            self.assertEqual((len(result.candidates), result.map_requests, http.call_count), (expected, 4, 4))
+            # One Overpass + three default category searches + four seed names.
+            self.assertEqual((len(result.candidates), result.map_requests, http.call_count), (expected, 8, 8))
+            queries = [call.kwargs["params"].get("q") for call in http.call_args_list]
+            self.assertEqual(queries[1:4], ["[attraction]", "[museum]", "[park]"])
+            self.assertEqual(sum(query in observations for query in queries), expected)
             self.assertEqual(len({c.candidate_id for c in result.candidates}), expected)
             self.assertEqual(result.problems, [])
             # A larger identity pool is not a claim of feasible days/access.

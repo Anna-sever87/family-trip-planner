@@ -214,6 +214,21 @@ class GenerationJobsTests(unittest.TestCase):
             web_service.get_trip_detail(2, status["trip_id"])
         self.assertEqual(web_service.get_trip_detail(1, status["trip_id"])["id"], status["trip_id"])
 
+    def test_partial_saved_result_is_not_announced_as_complete_and_replay_agrees(self):
+        def save_partial(owner, request, *, expected_account_key, generation_job_id):
+            envelope = request.model_dump()
+            envelope["generation_coverage"] = {"quality_status": "partial", "raw": "private-secret"}
+            return db.save_trip_bundle(owner, envelope, self.itinerary.model_dump(), [("General", "Synthetic")],
+                                      generation_job_id=generation_job_id, expected_account_key=expected_account_key)
+        self.worker.side_effect = save_partial
+        receipt = self.submit()
+        self.manager.executor.run_next()
+        status = jobs.get_job(1, self.account, job_id=receipt["job_id"])
+        self.assertEqual(status["status"], "succeeded")
+        self.assertIn("частично", status["message"])
+        self.assertNotIn("private-secret", json.dumps(status))
+        self.assertEqual(self.submit(), status)
+
     def test_lost_response_after_commit_keeps_success_not_exception_id(self):
         def saved_then_error(*args, **kwargs):
             self.save(*args, **kwargs)
