@@ -574,7 +574,7 @@ class CityCandidateTests(unittest.TestCase):
 
     def test_ekaterinburg_public_name_hints_survive_overpass_502_and_leave_room_for_museum(self):
         city = "Екатеринбург"
-        titles = ["Гринвич", "Пассаж", "Радуга Парк"]
+        titles = ["Гринвич", "Пассаж"]
         museum = "Тестовый художественный музей"
         self.hints.side_effect = name_hints.destination_name_hints
         self.completion.return_value.text = json.dumps({"titles": [museum]}, ensure_ascii=False)
@@ -595,12 +595,12 @@ class CityCandidateTests(unittest.TestCase):
             request(5, destination=f"{city}, Россия", interest_categories=["museums", "shopping_malls"]),
             {**CENTER, "name": city}, completion=self.completion, allow_partial_program=True)
         self.assertEqual((result.status, [item.title for item in result.candidates]), ("success", titles + [museum]))
-        self.assertEqual(result.map_requests, 5)
+        self.assertEqual(result.map_requests, 4)
         self.assertTrue(result.warnings)
         self.completion.assert_called_once()
         context = json.loads(self.completion.call_args.args[0][1]["content"])
         self.assertEqual([hint["title"] for hint in context["source_name_hints"]], titles)
-        self.assertEqual(context["remaining_name_slots"], 25)
+        self.assertEqual(context["remaining_name_slots"], 26)
 
     def test_names_only_schema_has_request_specific_cap(self):
         for days, expected in ((1, 12), (4, 24), (7, 36), (14, 36)):

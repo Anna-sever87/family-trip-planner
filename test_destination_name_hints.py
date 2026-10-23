@@ -107,18 +107,17 @@ class DestinationNameHintsTests(unittest.TestCase):
         first[0]["title"] = "Changed by caller"
         self.assertEqual(self.read(payload), [_entry()])
 
-    def test_ekaterinburg_public_hints_are_three_unique_primary_source_names_only(self):
+    def test_ekaterinburg_public_hints_are_two_unique_primary_source_names_only(self):
         expected = {
             "Гринвич": "https://grinvich.com/contacts/",
             "Пассаж": "https://passage.ru/contacts/",
-            "Радуга Парк": "https://radugapark.ru/kontakty/",
         }
         # Public application source data, not an operator file or user database.
         for alias in ("Екатеринбург", "Екатеринбург, Россия", "Екатеринбург, Свердловская область, Россия"):
             with self.subTest(alias=alias), patch.object(Path, "write_text", side_effect=AssertionError("Read only")):
                 entries = hints.destination_name_hints(alias, limit=8)
                 self.assertEqual({item["title"]: item["source_url"] for item in entries}, expected)
-                self.assertEqual(len(entries), 3)
+                self.assertEqual(len(entries), 2)
                 for item in entries:
                     self.assertEqual(set(item), {"title", "place_query", "locality", "source_url"})
                     self.assertEqual(item["locality"], "Екатеринбург")
