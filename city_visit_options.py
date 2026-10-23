@@ -215,7 +215,8 @@ def visit_option(candidate, request: TripRequest, *, visit_cards=()) -> CityVisi
         if conditions is not None:
             return _option_from_conditions(candidate, request, conditions)
         kind = candidate.record.get("type", "")
-        duration = (90 if kind in _LONG_PLANNING_TYPES else 30 if kind in _SHORT_PLANNING_TYPES
+        shopping = candidate.record.get("category") == "shop" and kind in {"mall", "shopping_centre"}
+        duration = (90 if kind in _LONG_PLANNING_TYPES or shopping else 30 if kind in _SHORT_PLANNING_TYPES
                     else 60 if kind in _MEDIUM_PLANNING_TYPES else 45)
         basis, sources = "planning_estimate", ()
         published = lookup_city_visit_estimate(candidate)
@@ -226,10 +227,13 @@ def visit_option(candidate, request: TripRequest, *, visit_cards=()) -> CityVisi
             return None  # A cap is not a source for selecting a shorter visit.
         indoor = None if city_candidate_may_have_shelter(candidate.record) else False
         unknown = ("price", "hours", "children", "minimum_age") + (("indoor",) if indoor is None else ())
-        description = (f"Осмотр «{candidate.title}». Плановый блок {duration} минут — "
+        activity = "Прогулка и покупки по желанию в" if shopping else "Осмотр"
+        description = (f"{activity} «{candidate.title}». Плановый блок {duration} минут — "
                        + ("нижняя граница опубликованной типичной длительности." if basis == "published" else
                           "оценка планирования, не подтверждённая длительность посещения.")
                        + " Часы работы, стоимость и условия посещения уточните заранее.")
+        if shopping:
+            description += " Личные покупки не включены в расчёт стоимости маршрута."
         return CityVisitOption(candidate.candidate_id, duration, indoor, None, description, basis, unknown, sources)
     except (TypeError, ValueError, KeyError, AttributeError, OverflowError):
         return None

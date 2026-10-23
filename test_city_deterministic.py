@@ -348,6 +348,149 @@ class DeterministicCityTests(unittest.TestCase):
         self.assert_valid(result, req, pool)
         self.assertEqual(result.coverage["selected_ids_by_day"]["1"], priority)
 
+    def test_six_place_mixed_pool_honestly_covers_two_of_five_requested_days(self):
+        req = request(5, start_time="10:00", end_time="18:00", budget=70000,
+                      travel_cost=20000, lodging_cost=25000)
+        pool = candidates(6)
+        kinds = ("museum", "museum", "theatre", "place_of_worship", "theatre", "park")
+        for candidate, kind in zip(pool, kinds):
+            candidate.record["type"] = kind
+        result = self.build(req, pool)
+        self.assert_valid(result, req, pool)
+        self.assertEqual((result.coverage["program_days"], result.coverage["free_days"]), (2, 3))
+        self.assertEqual(result.coverage["daily_program_target_minutes"], 180)
+        self.assertEqual(result.coverage["meal_reserve_total"], 7000)
+        self.assertEqual(result.coverage["selected_unique_visits"], 5)
+
+    def test_rich_eighteen_place_pool_covers_five_long_adult_days(self):
+        req, pool = request(5, start_time="08:00", end_time="21:00"), candidates(18)
+        result = self.build(req, pool)
+        self.assert_valid(result, req, pool)
+        self.assertEqual(result.coverage["program_days"], 5)
+        self.assertEqual(result.coverage["selected_unique_visits"], 15)
+        self.assertLessEqual(result.coverage["states_explored"], engine.MAX_SEARCH_STATES)
+
+    def test_conflicting_early_windows_do_not_starve_sixteen_other_visits(self):
+        req, pool = request(5, start_time="08:00", end_time="21:00"), candidates(18)
+        chosen = options(pool, cost=0)
+        windows = tuple({"date": (date.fromisoformat(req.start_date) + timedelta(days=index)).isoformat(),
+                         "start": "09:00", "end": "10:30", "basis": "source"} for index in range(5))
+        for index in (0, 1):
+            chosen[index] = replace(chosen[index], opening_windows=windows)
+        first = self.build(req, pool, chosen_options=chosen)
+        reversed_result = self.build(req, list(reversed(pool)), chosen_options=list(reversed(chosen)))
+        self.assert_valid(first, req, pool)
+        self.assertEqual(first.coverage["program_days"], 5)
+        self.assertEqual(first.coverage, reversed_result.coverage)
+        self.assertLessEqual(first.coverage["states_explored"], engine.MAX_SEARCH_STATES)
+
+    def test_group_budget_is_bounded_and_reports_unfinished_search(self):
+        req, pool = request(1, start_time="09:07", end_time="14:07"), candidates(2, separation=0)
+        chosen = options(pool)
+        prepared = [engine._checked_option(value, option, [req.start_date]) for value, option in zip(pool, chosen)]
+        counter = engine._Budget(engine.MAX_SEARCH_STATES)
+        # Two visits cannot both use the same exclusive 90-minute window;
+        # this impossibility is rejected before any costly lunch search.
+        self.assertIsNone(engine._template((0, 1), prepared, (((547, 637),), ((547, 637),)),
+                                           547, 847, {(0, 1): 0}, counter, 15000, attempt_limit=3))
+        self.assertEqual(counter.used, 0)
+        with patch.object(engine, "_place_visit", return_value=None):
+            self.assertIsNone(engine._template((0, 1), prepared, (((547, 847),), ((547, 847),)),
+                                               547, 847, {(0, 1): 0}, counter, 15000, attempt_limit=3))
+        self.assertEqual((counter.used, counter.group_limits, counter.limited), (3, 1, True))
+
+    @staticmethod
+    def shopping_pool():
+        pool = candidates(4)
+        mall = pool[-1]
+        mall.title = "Торговый центр Северный"
+        mall.place_query = f"{mall.title}, Тестгород, Россия"
+        mall.record.update(name=mall.place_query, category="shop", type="mall")
+        return pool
+
+    def test_early_pair_bound_does_not_require_nonadjacent_transfer(self):
+        req, pool = request(1), candidates(3)
+        chosen = options(pool)
+        chosen[2] = replace(chosen[2], duration_min=1)
+        prepared = [engine._checked_option(value, option, [req.start_date])
+                    for value, option in zip(pool, chosen)]
+        counter = engine._Budget(engine.MAX_SEARCH_STATES)
+        template = engine._template((0, 1, 2), prepared,
+            (((540, 630),), ((631, 721),), ((630, 631),)), 540, 900,
+            {(0, 1): .04, (0, 2): .02, (1, 2): .02}, counter, 15000,
+            attempt_limit=engine.MAX_GROUP_SEARCH_STATES)
+        self.assertIsNotNone(template)
+        self.assertEqual(template.order, (0, 2, 1))
+
+    def test_requested_mall_survives_minimal_subset_pruning_and_priority(self):
+        req, pool = request(1), self.shopping_pool()
+        mall_id = pool[-1].candidate_id
+        chosen = options(pool, cost=0)
+        chosen[-1] = replace(chosen[-1], duration_min=45)
+        result = self.build(req, pool, candidate_priority=[item.candidate_id for item in pool],
+                            required_any_of_ids=[mall_id], chosen_options=chosen)
+        self.assert_valid(result, req, pool)
+        self.assertTrue(result.coverage["requested_category_satisfied"])
+        self.assertIn(mall_id, result.coverage["selected_ids_by_day"]["1"])
+        self.assertEqual(result.coverage["program_days"], 1)
+
+    def test_requested_mall_cannot_override_budget_or_closed_dates(self):
+        req, pool = request(1, budget=3000), self.shopping_pool()
+        for changes in ({"estimated_cost": 5000}, {"allowed_dates": ()}):
+            chosen = options(pool, cost=0)
+            chosen[-1] = replace(chosen[-1], duration_min=45, **changes)
+            result = self.build(req, pool, chosen_options=chosen,
+                                required_any_of_ids=[pool[-1].candidate_id])
+            self.assert_valid(result, req, pool)
+            self.assertFalse(result.coverage["requested_category_satisfied"])
+            self.assertIn("requested_shopping_not_scheduled", result.reasons)
+            self.assertTrue(any("торговый центр не вошёл" in tip for tip in result.itinerary.tips))
+            self.assertEqual(result.coverage["program_days"], 1)
+
+    def test_required_candidate_ids_cannot_invent_or_repeat_a_place(self):
+        for identifiers in (["osm-node-99999"], [True], ["osm-node-101"] * 2, "osm-node-101"):
+            with self.subTest(identifiers=identifiers):
+                self.assertEqual(self.build(required_any_of_ids=identifiers).status, "invalid_request")
+
+    def test_requested_mall_preserves_full_calendar_before_expensive_interest_search(self):
+        req, pool = request(5, start_time="10:00", end_time="18:00", budget=17000), candidates(11)
+        pool[-1].record.update(category="shop", type="mall")
+        chosen = options(pool, cost=1000)
+        chosen[-1] = replace(chosen[-1], estimated_cost=8000)
+        baseline = self.build(req, pool, chosen_options=chosen)
+        result = self.build(req, pool, chosen_options=chosen,
+                            required_any_of_ids=[pool[-1].candidate_id])
+        self.assert_valid(result, req, pool)
+        self.assertEqual(baseline.coverage["program_days"], 5)
+        self.assertEqual(result.coverage["program_days"], baseline.coverage["program_days"])
+        self.assertFalse(result.coverage["requested_category_satisfied"])
+        self.assertLessEqual(result.coverage["states_explored"], engine.MAX_SEARCH_STATES)
+
+    def test_requested_mall_does_not_override_children_or_rain_conditions(self):
+        pool = self.shopping_pool()
+        for changes in ({"children_allowed": False}, {"min_child_age": 12}):
+            req = request(1, children_ages=[8])
+            chosen = options(pool, cost=0)
+            chosen[-1] = replace(chosen[-1], **changes)
+            result = self.build(req, pool, chosen_options=chosen,
+                                required_any_of_ids=[pool[-1].candidate_id])
+            self.assert_valid(result, req, pool)
+            self.assertFalse(result.coverage["requested_category_satisfied"])
+            self.assertIn({"candidate_id": pool[-1].candidate_id, "reason": "age_restriction"},
+                          result.coverage["exclusions"])
+        # Unknown mall shelter is not promoted to indoor evidence. Only the
+        # separate museum with an explicitly supplied indoor option shelters
+        # this rainy program, and no three-visit group has an indoor majority.
+        req = request(1)
+        chosen = options(pool, cost=0)
+        chosen[0] = replace(chosen[0], indoor=True)
+        chosen[-1] = replace(chosen[-1], duration_min=45)
+        result = self.build(req, pool, chosen_options=chosen, rainy=[req.start_date],
+                            required_any_of_ids=[pool[-1].candidate_id])
+        self.assert_valid(result, req, pool, [req.start_date])
+        self.assertFalse(result.coverage["requested_category_satisfied"])
+        self.assertEqual(result.coverage["program_days"], 1)
+
     def test_candidate_priority_cannot_authorize_unknown_duplicate_or_unaffordable_ids(self):
         req, pool = request(1, budget=3400), candidates(4)
         for bad in ([pool[0].candidate_id] * 2, ["osm-node-999"], "osm-node-101", [True]):

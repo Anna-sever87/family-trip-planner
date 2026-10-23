@@ -1,7 +1,9 @@
 """Source-first candidate pool for the opt-in city planner.
 
 At most one name-only completion, two real HTTP attempts per unique name and
-36 in total. Map identity does not establish visitability, hours, prices,
+36 HTTP sends in total, including optional shopping discovery. Raw proposals
+and usable candidates have separate caps: a rejected name is not a visit.
+Map identity does not establish visitability, hours, prices,
 duration, shelter, or suitability for children. No cache/database writes,
 except the existing shared Nominatim request clock required by its policy.
 """
@@ -20,6 +22,7 @@ import httpx
 
 import places
 from candidate_grounding import _eligible_poi_type
+from city_preferences import shopping_preference
 from destination_name_hints import destination_name_hints
 from rules import MAX_CITY_RADIUS_KM, is_generic_attraction
 from schemas import TripRequest
@@ -27,6 +30,10 @@ from schemas import TripRequest
 
 MAX_MAP_REQUESTS = 36
 MAX_REQUESTS_PER_NAME = 2
+_SHOPPING_DISCOVERY_URL = "https://overpass-api.de/api/interpreter"
+_SHOPPING_TYPES = frozenset({"mall", "shopping_centre"})
+_SHOPPING_NAME_LIMIT = 4
+_SHOPPING_RESPONSE_LIMIT = 64
 _LOCAL_NAME_LANGUAGES = {"vn": "vi,en", "tr": "tr,en"}
 _LOCAL_MAX_TITLES = 14
 # Do not whitelist ASCII: Vietnamese/Turkish diacritics and other original
@@ -67,6 +74,7 @@ class CityCandidateResult:
     normalized_proposals: list[dict[str, str]] = field(default_factory=list)
     status: str = "success"
     warnings: list[str] = field(default_factory=list)
+    diagnostics: dict = field(default_factory=dict)
 
 
 def _label(value: Any, maximum: int = 80) -> bool:
@@ -291,8 +299,13 @@ def _rejection_detail(title: str, raw: Any, center: dict) -> str:
     return "canonical_record_mismatch"
 
 
-def _lookup(title: str, country: str, center: dict, result: CityCandidateResult) -> dict | None:
-    predicate = lambda record: _canonical_record(title, record, center) is not None
+def _lookup(title: str, country: str, center: dict, result: CityCandidateResult, *,
+            shopping_identity=None) -> dict | None:
+    def predicate(record):
+        return (_canonical_record(title, record, center) is not None
+                and (shopping_identity is None or (
+                    places.map_record_identity(record) == shopping_identity
+                    and record.get("category") == "shop" and record.get("type") in _SHOPPING_TYPES)))
     cached = places._cached_nearby_named(title, country, center["lat"], center["lon"],
                                        MAX_CITY_RADIUS_KM, place_filter=predicate)
     if cached is not None:
@@ -318,9 +331,9 @@ def _lookup(title: str, country: str, center: dict, result: CityCandidateResult)
             if not isinstance(data, list) or len(data) > 5:
                 raise ValueError("invalid map response")
             for raw in data:
-                record = _canonical_record(title, _from_provider(raw), center)
-                if record is not None:
-                    return record
+                record = _from_provider(raw)
+                if predicate(record):
+                    return _canonical_record(title, record, center)
             result.rejected.append({
                 "title": title, "reason": "limited_search_unconfirmed",
                 "detail": "empty_result" if not data else "record_mismatch",
@@ -336,6 +349,63 @@ def _lookup(title: str, country: str, center: dict, result: CityCandidateResult)
     return None
 
 
+def _shopping_name_hints(center: dict, result: CityCandidateResult) -> list[dict]:
+    """One bounded source-name query; no Overpass item becomes a visit fact.
+
+    shop=mall and shop=shopping_centre are separate observed complex types,
+    neither proves indoor access. Nominatim must independently confirm the
+    same OSM object, official name, country and locality before admission.
+    See https://wiki.openstreetmap.org/wiki/Tag:shop%3Dmall .
+    """
+    if result.map_requests >= MAX_MAP_REQUESTS:
+        return []
+    query = (f'[out:json][timeout:12][maxsize:1048576];'
+             f'nwr["shop"~"^(mall|shopping_centre)$"]["name"]'
+             f'(around:{int(MAX_CITY_RADIUS_KM * 1000)},{center["lat"]:.7f},{center["lon"]:.7f});'
+             f'out tags center {_SHOPPING_RESPONSE_LIMIT};')
+    try:
+        result.map_requests += 1
+        response = httpx.get(_SHOPPING_DISCOVERY_URL, params={"data": query},
+                             headers={"User-Agent": places.USER_AGENT}, timeout=15)
+        response.raise_for_status()
+        if len(response.content) > 256_000:
+            raise ValueError("oversized shopping discovery response")
+        payload = response.json()
+        elements = payload.get("elements") if isinstance(payload, dict) else None
+        if (not isinstance(elements, list) or len(elements) > _SHOPPING_RESPONSE_LIMIT
+                or payload.get("remark")):
+            raise ValueError("invalid or incomplete shopping discovery response")
+        found = []
+        for element in elements:
+            if not isinstance(element, dict):
+                continue
+            tags = element.get("tags")
+            coords = element if element.get("type") == "node" else element.get("center")
+            if (not isinstance(tags, dict) or tags.get("shop") not in _SHOPPING_TYPES
+                    or not _label(tags.get("name")) or is_generic_attraction(tags["name"], "")
+                    or element.get("type") not in {"node", "way", "relation"}
+                    or type(element.get("id")) is not int or element["id"] <= 0
+                    or not _finite_coordinates(coords)):
+                continue
+            distance = places.distance_km(center["lat"], center["lon"], coords["lat"], coords["lon"])
+            if distance <= MAX_CITY_RADIUS_KM:
+                found.append((distance, tags["name"], ("osm", element["type"], element["id"])))
+        hints, seen = [], set()
+        for _, title, identity in sorted(found):
+            key = places._identity_words(title)
+            if key not in seen:
+                seen.add(key)
+                hints.append({"title": title, "identity": identity})
+            if len(hints) >= _SHOPPING_NAME_LIMIT:
+                break
+        if not hints:
+            result.warnings.append("Ограниченный поиск не нашёл названий торговых центров; это не доказывает их отсутствие.")
+        return hints
+    except (httpx.HTTPError, ValueError, TypeError, KeyError, OverflowError):
+        result.warnings.append("Источник названий торговых центров недоступен или вернул неполный ответ; повторного запроса нет.")
+        return []
+
+
 def ground_city_candidates(request: TripRequest, center: dict, *, completion: Callable,
                            rainy_dates=(), allow_partial_program: bool = False) -> CityCandidateResult:
     """Source names first, at most one AI supplement, no city resolution/retry.
@@ -348,7 +418,8 @@ def ground_city_candidates(request: TripRequest, center: dict, *, completion: Ca
     """
     result = CityCandidateResult()
     try:
-        limit = min(18, 2 * request.days_count + 4)
+        limit = min(36, 4 * request.days_count + 8)
+        usable_limit = min(18, 3 * request.days_count + 3)
         parts = [part.strip() for part in request.destination.split(",")]
         code = _country_code(center.get("country_code")) if isinstance(center, dict) else ""
         if (type(allow_partial_program) is not bool
@@ -367,6 +438,7 @@ def ground_city_candidates(request: TripRequest, center: dict, *, completion: Ca
         center = dict(center, country_code=code)
         if code in _LOCAL_NAME_LANGUAGES:
             limit = min(limit, _LOCAL_MAX_TITLES)
+            usable_limit = min(usable_limit, _LOCAL_MAX_TITLES)
     except (TypeError, ValueError, KeyError):
         result.status = "invalid_request"
         result.problems.append("Нужен подтверждённый город с конечными координатами, страной и корректными датами; AI не вызывался.")
@@ -396,10 +468,13 @@ def ground_city_candidates(request: TripRequest, center: dict, *, completion: Ca
     source_hints = [{"title": hint["title"], "source_url": hint["source_url"]}
                     for hint in source_hints if _label(hint.get("title"))][:limit]
     seen_names, seen_ids = set(), set()
+    remaining_source_hints = []
 
-    def consume_titles(titles):
+    def consume_titles(titles, *, shopping_identities=None, model_proposals=False):
         for raw_title in titles:
-            title = _proposal_name(raw_title)
+            if len(result.candidates) >= usable_limit or result.map_requests >= MAX_MAP_REQUESTS:
+                break
+            title = _proposal_name(raw_title) if model_proposals else raw_title
             if title != raw_title:
                 result.normalized_proposals.append({"original_title": raw_title, "title": title,
                                                     "reason": "single_leading_period"})
@@ -419,7 +494,8 @@ def ground_city_candidates(request: TripRequest, center: dict, *, completion: Ca
                     or _descriptive_city_zoo(title, request, center)):
                 result.rejected.append({"title": title, "reason": "generic_name_or_non_visit"})
                 continue
-            record = _lookup(title, country, center, result)
+            kwargs = ({"shopping_identity": shopping_identities[title]} if shopping_identities else {})
+            record = _lookup(title, country, center, result, **kwargs)
             if record is None:
                 continue
             identity = places.map_record_identity(record)
@@ -433,6 +509,17 @@ def ground_city_candidates(request: TripRequest, center: dict, *, completion: Ca
             ))
 
     def finish(error: str = "", error_status: str = ""):
+        # The supplementary AI never discards still-unchecked source names.
+        # All three tranches share the same raw/usable/HTTP hard ceilings.
+        consume_titles(hint["title"] for hint in remaining_source_hints)
+        result.diagnostics = {
+            "attempted_names": len(seen_names), "name_limit": limit, "usable_limit": usable_limit,
+            "limits_reached": [name for name, reached in (
+                ("name_limit", len(seen_names) >= limit),
+                ("usable_limit", len(result.candidates) >= usable_limit),
+                ("http_limit", result.map_requests >= MAX_MAP_REQUESTS),
+            ) if reached],
+        }
         enough = bool(result.candidates) and (allow_partial_program or len(result.candidates) >= request.days_count)
         if error:
             if enough:
@@ -453,9 +540,23 @@ def ground_city_candidates(request: TripRequest, center: dict, *, completion: Ca
             )
         return result
 
-    # A failed AI supplement cannot discard independently grounded source names.
-    consume_titles(hint["title"] for hint in source_hints)
-    if len(seen_names) >= limit or result.map_requests >= MAX_MAP_REQUESTS:
+    # Reserve source discovery for the explicit shopping interest before the
+    # generic hints consume the bounded name pool. Negative wishes win.
+    shopping = shopping_preference(request)
+    if shopping == "requested":
+        shopping_hints = _shopping_name_hints(center, result)
+        consume_titles((hint["title"] for hint in shopping_hints),
+                       shopping_identities={hint["title"]: hint["identity"] for hint in shopping_hints})
+    # Reserve at least half the remaining HTTP sends for the AI supplement,
+    # even when every source name needs both network attempts. A large source
+    # list must not exhaust the raw budget before the one allowed supplement.
+    first_source_limit = min(18, limit // 2, max(0, (MAX_MAP_REQUESTS - result.map_requests) // 4))
+    consume_titles(hint["title"] for hint in source_hints[:first_source_limit])
+    remaining_source_hints = source_hints[first_source_limit:]
+    checked_source_hints = [hint for hint in source_hints
+                            if places._identity_words(hint["title"]) in seen_names]
+    if (len(seen_names) >= limit or result.map_requests >= MAX_MAP_REQUESTS
+            or len(result.candidates) >= usable_limit):
         return finish()
     context = {
         "destination": request.destination, "city": center.get("name", parts[0]),
@@ -464,9 +565,14 @@ def ground_city_candidates(request: TripRequest, center: dict, *, completion: Ca
         "rainy_dates": rainy_dates,
         "children_ages": request.children_ages, "interests": request.interest_categories,
         "wishes": request.wishes, "pace": request.pace, "max_titles": limit, "radius_km": MAX_CITY_RADIUS_KM,
-        "source_name_hints": source_hints,
+        "source_name_hints": checked_source_hints,
         "source_names_already_checked": True,
         "remaining_name_slots": limit - len(seen_names),
+        "usable_candidate_limit": usable_limit,
+        "shopping_preference": shopping,
+        "shopping_names_already_checked": [item.title for item in result.candidates
+                                           if item.record.get("category") == "shop"
+                                           and item.record.get("type") in _SHOPPING_TYPES],
     }
     local_name_rule = ""
     if code in _LOCAL_NAME_LANGUAGES:
@@ -498,6 +604,9 @@ def ground_city_candidates(request: TripRequest, center: dict, *, completion: Ca
             "Предложи дополнительные известные тебе точные названия, если они есть; "
             "если других уверенно известных имён нет, верни пустой список без выдумок. "
             "Учитывай интересы и состав семьи, но не утверждай пригодность, доступность или открытие на даты. "
+            "Если shopping_preference=requested, предложи конкретные известные торговые центры, "
+            "которых ещё нет в shopping_names_already_checked; не заменяй этот интерес одними музеями. "
+            "При shopping_preference=excluded не предлагай торговые центры. "
             "Если rainy_dates не пуст, предложи реальные разные музеи и крытые экспозиции для разных дождливых дат, "
             "не повторяя одно место. Название и карта не подтверждают indoor: это кандидаты для дальнейшей проверки, "
             "не гарантия работы или укрытия от дождя. "
@@ -527,5 +636,5 @@ def ground_city_candidates(request: TripRequest, center: dict, *, completion: Ca
     except (AttributeError, TypeError, ValueError, RecursionError):
         return finish("Ответ кандидатов нарушил формат названий; дополнительные места не проверялись, "
                       "AI не повторялся. Уже подтверждённые исходные места сохранены.", "invalid_ai_response")
-    consume_titles(titles)
+    consume_titles(titles, model_proposals=True)
     return finish()

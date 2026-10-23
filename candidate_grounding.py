@@ -134,9 +134,16 @@ def _eligible_poi_type(record: dict[str, Any]) -> bool:
         (record.get("category"), record.get("type")) in {("amenity", "university"), ("office", "research")}
         and isinstance(tags, dict) and tags.get("observatory:type") == "astronomical"
     )
+    # Only the dedicated shopping-centre tags qualify, not arbitrary shops or
+    # a building/administrative object that happens to have the same label.
+    is_shopping_centre = (
+        record.get("category") == "shop"
+        and record.get("type") in {"mall", "shopping_centre"}
+    )
     return (
         record.get("category") not in {"place", "boundary"}
-        and (record.get("type") in POI_TYPES or _small_named_lake(record) or is_astronomical_observatory)
+        and (record.get("type") in POI_TYPES or _small_named_lake(record)
+             or is_astronomical_observatory or is_shopping_centre)
     )
 
 

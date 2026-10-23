@@ -150,7 +150,7 @@ class CityCandidateTests(unittest.TestCase):
                 result = self.foreign_pool([TITLE], code=code, days=7)
                 self.assertEqual(len(result.candidates), 1)
                 schema = self.completion.call_args.kwargs["json_schema"]["properties"]["titles"]
-                self.assertEqual(schema["maxItems"], 18)
+                self.assertEqual(schema["maxItems"], 36)
                 self.assertNotIn("pattern", schema["items"])
                 self.assertEqual(self.get.call_args.kwargs["params"]["accept-language"], "ru")
 
@@ -243,7 +243,7 @@ class CityCandidateTests(unittest.TestCase):
                     self.assertEqual(len(context["source_name_hints"]), expected)
                     self.assertEqual(self.get.call_count, expected)
                     self.assertEqual(len(result.candidates), expected)
-                    self.hints.assert_called_with(destination, limit=6)
+                    self.hints.assert_called_with(destination, limit=12)
 
     def test_source_names_are_seed_first_deduplicated_and_still_require_map(self):
         seed = {"title": TITLE, "source_url": "https://example.invalid/official-name",
@@ -280,8 +280,8 @@ class CityCandidateTests(unittest.TestCase):
         self.assertFalse(self.run_pool([]).candidates)
         self.assertEqual(self.get.call_count, 1)  # No source-name bypass of the ordinary map check.
 
-    def test_seed_plus_ai_total_name_and_http_caps_remain_unchanged(self):
-        for days, code, limit in ((1, "RU", 6), (7, "RU", 18), (7, "VN", 14), (7, "TR", 14)):
+    def test_seed_plus_ai_raw_names_share_unchanged_http_cap(self):
+        for days, code, limit in ((1, "RU", 12), (7, "RU", 36), (7, "VN", 14), (7, "TR", 14)):
             with self.subTest(days=days, code=code):
                 self.get.reset_mock()
                 self.gate.reset_mock()
@@ -292,12 +292,13 @@ class CityCandidateTests(unittest.TestCase):
                 ai_names = [seeds[0]] + [f"Model Museum {number}" for number in range(limit - 1)]
                 center = {**CENTER, "name": "Test City", "country_code": code}
                 result = self.run_pool(ai_names, days=days, center=center, destination=f"Test City, {code}")
-                self.assertEqual(result.map_requests, 2 * limit)
-                self.assertEqual(self.get.call_count, 2 * limit)
-                self.assertEqual(self.gate.call_count, 2 * limit)
+                sends = min(36, 2 * limit)
+                self.assertEqual(result.map_requests, sends)
+                self.assertEqual(self.get.call_count, sends)
+                self.assertEqual(self.gate.call_count, sends)
                 queries = [call.kwargs["params"]["q"] for call in self.get.call_args_list[::2]]
                 self.assertEqual(queries[:3], [f"{title}, {code}" for title in seeds])
-                self.assertEqual(len(set(queries)), limit)
+                self.assertEqual(len(set(queries)), sends // 2)
                 self.hints.assert_called_with(f"Test City, {code}", limit=limit)
 
     def test_peak_record_cannot_become_city_visit_from_fresh_or_cached_map(self):
@@ -349,8 +350,260 @@ class CityCandidateTests(unittest.TestCase):
         self.assertNotIn("indoor", item.record)
         self.assertEqual(self.cache, {})
 
+    def shopping_response(self, elements, **changes):
+        payload = {"elements": elements, **changes}
+        return SimpleNamespace(raise_for_status=lambda: None,
+                               content=json.dumps(payload).encode(), json=lambda: deepcopy(payload))
+
+    def mall_element(self, title="Северный пассаж", identifier=123, **changes):
+        return {"type": "node", "id": identifier, "lat": 52.02, "lon": 105.03,
+                "tags": {"shop": "mall", "name": title, "opening_hours": "24/7", "fee": "no"}, **changes}
+
+    def test_shopping_checkbox_discovers_source_names_then_independently_checks_same_map_id(self):
+        title = "Северный пассаж"
+        observed = record(title, category="shop", type="mall")
+        self.get.side_effect = [self.shopping_response([self.mall_element(title)]), response([observed])]
+        result = self.run_pool([], interest_categories=["main_sights", "museums", "theatre", "shopping_malls"], wishes="")
+        self.assertEqual([item.title for item in result.candidates], [title])
+        self.assertEqual((result.map_requests, self.get.call_count, self.gate.call_count), (2, 2, 1))
+        discovery = self.get.call_args_list[0]
+        self.assertEqual(discovery.args[0], candidates._SHOPPING_DISCOVERY_URL)
+        query = discovery.kwargs["params"]["data"]
+        self.assertIn('["shop"~"^(mall|shopping_centre)$"]', query)
+        self.assertIn("around:40000,52.0000000,105.0000000", query)
+        self.assertIn("out tags center 64", query)
+        self.assertEqual(self.get.call_args_list[1].kwargs["params"]["q"], f"{title}, Россия")
+        self.assertNotIn("opening_hours", str(result.candidates[0].record))
+        self.assertNotIn("fee", str(result.candidates[0].record))
+        context = json.loads(self.completion.call_args.args[0][1]["content"])
+        self.assertEqual(context["shopping_preference"], "requested")
+        self.assertEqual(context["shopping_names_already_checked"], [title])
+
+    def test_shopping_discovery_is_not_used_without_interest_or_with_explicit_exclusion(self):
+        for interests, wishes in ((["museums"], ""), (["shopping_malls"], "Без торговых центров"),
+                                  (["shopping_malls"], "No malls")):
+            with self.subTest(wishes=wishes):
+                self.get.reset_mock()
+                result = self.run_pool([TITLE], interest_categories=interests, wishes=wishes)
+                self.assertEqual(result.map_requests, 1)
+                self.assertEqual(self.get.call_args.args[0], places.NOMINATIM_URL)
+
+    def test_shopping_discovery_does_not_accept_other_identity_type_country_or_remote_object(self):
+        title = "Северный пассаж"
+        base = record(title, category="shop", type="mall")
+        bad = [dict(base, osm_id=999), dict(base, category="tourism", type="museum"),
+               dict(base, address={"city": AREA, "country_code": "fr", "country": "France"}),
+               dict(base, lat="53.5")]
+        for observation in bad:
+            with self.subTest(observation=observation):
+                self.get.side_effect = [self.shopping_response([self.mall_element(title)]), response([observation])]
+                result = self.run_pool([], interest_categories=["shopping_malls"])
+                self.assertFalse(result.candidates)
+                self.assertEqual(result.map_requests, 2)
+
+    def test_shopping_discovery_accepts_way_center_and_keeps_shopping_centre_type(self):
+        title = "Северный пассаж"
+        element = self.mall_element(title, type="way", center={"lat": 52.02, "lon": 105.03},
+                                    tags={"shop": "shopping_centre", "name": title})
+        self.get.side_effect = [self.shopping_response([element]), response([
+            record(title, category="shop", type="shopping_centre", osm_type="way")])]
+        result = self.run_pool([], interest_categories=["shopping_malls"])
+        self.assertEqual(result.candidates[0].record["type"], "shopping_centre")
+        self.assertEqual(result.candidates[0].candidate_id, "osm-way-123")
+
+    def test_shopping_discovery_failures_are_bounded_and_do_not_claim_no_malls(self):
+        for discovery in (httpx.ConnectTimeout("offline"), self.shopping_response([], remark="timeout"),
+                          self.shopping_response([self.mall_element()] * 65)):
+            with self.subTest(discovery=type(discovery).__name__):
+                self.get.side_effect = [discovery, response([record()])]
+                result = self.run_pool([TITLE], interest_categories=["shopping_malls"])
+                self.assertEqual((result.map_requests, len(result.candidates)), (2, 1))
+                self.assertTrue(result.warnings)
+                self.assertEqual(result.usage["completion_calls"], 1)
+
+    def test_shopping_discovery_skips_generic_remote_and_malformed_source_items(self):
+        bad = [self.mall_element(title="Торговый центр"), self.mall_element(lat=True),
+               self.mall_element(identifier=True), self.mall_element(lat=60.0),
+               self.mall_element(tags={"shop": "supermarket", "name": "Северный магазин"}),
+               self.mall_element(type="way", center={"lat": float("nan"), "lon": 105.03}),
+               {"tags": "mall"}, None]
+        self.get.side_effect = [self.shopping_response(bad)]
+        result = self.run_pool([], interest_categories=["shopping_malls"])
+        self.assertFalse(result.candidates)
+        self.assertEqual(result.map_requests, 1)
+        self.assertTrue(result.warnings)
+
+    def test_leading_period_in_source_name_is_not_ai_normalized_or_used_as_dictionary_key(self):
+        title = ". Северный пассаж"
+        self.get.side_effect = [self.shopping_response([self.mall_element(title)])]
+        result = self.run_pool([], interest_categories=["shopping_malls"])
+        self.assertEqual(result.map_requests, 1)
+        self.assertFalse(result.candidates)
+        self.assertFalse(result.normalized_proposals)
+        self.assertIn({"title": title, "reason": "unsupported_leading_punctuation"}, result.rejected)
+
+    def test_generic_source_name_with_period_is_not_silently_rewritten(self):
+        self.hints.return_value = [{"title": ". " + TITLE, "source_url": "https://example.invalid/name"}]
+        result = self.run_pool([])
+        self.assertEqual(result.map_requests, 0)
+        self.assertFalse(result.normalized_proposals)
+        self.get.assert_not_called()
+
+    def test_shopping_lookup_does_not_reuse_unrelated_cached_object(self):
+        title = "Северный пассаж"
+        self.cache[title] = cached(record(title, identifier=999, category="shop", type="mall"))
+        self.get.side_effect = [self.shopping_response([self.mall_element(title)]),
+                               response([record(title, category="shop", type="mall")])]
+        result = self.run_pool([], interest_categories=["shopping_malls"])
+        self.assertEqual(result.candidates[0].candidate_id, "osm-node-123")
+        self.assertEqual(result.map_requests, 2)
+
+    def test_all_mall_candidates_do_not_expand_usable_pool_or_call_ai_when_full(self):
+        elements = [self.mall_element(f"Северный пассаж {i}", i + 1) for i in range(4)]
+        seeds = [f"Test Museum {i}" for i in range(10)]
+        self.hints.return_value = [{"title": title, "source_url": "https://example.invalid/name"} for title in seeds]
+        def get(url, **kwargs):
+            if url == candidates._SHOPPING_DISCOVERY_URL:
+                return self.shopping_response(elements)
+            title = kwargs["params"]["q"].split(",", 1)[0]
+            if title.startswith("Северный пассаж"):
+                return response([record(title, int(title.rsplit(" ", 1)[1]) + 1, category="shop", type="mall")])
+            return response([record(title, seeds.index(title) + 10)])
+        self.get.side_effect = get
+        result = self.run_pool([], interest_categories=["shopping_malls"])
+        self.assertEqual((len(result.candidates), result.map_requests), (6, 7))
+        self.assertEqual(result.usage["completion_calls"], 0)
+        self.completion.assert_not_called()
+
+    def test_shopping_discovery_limits_source_names_and_counts_send_in_total_36(self):
+        elements = [self.mall_element(f"Северный пассаж {i}", i + 1) for i in range(8)]
+        calls = 0
+        def get(url, **kwargs):
+            nonlocal calls
+            calls += 1
+            if url == candidates._SHOPPING_DISCOVERY_URL:
+                return self.shopping_response(elements)
+            raise httpx.ConnectTimeout("offline")
+        self.get.side_effect = get
+        result = self.run_pool([f"Museum proposal {i}" for i in range(36)], days=7,
+                               interest_categories=["shopping_malls"])
+        self.assertEqual((calls, result.map_requests), (36, 36))
+        self.assertEqual(self.gate.call_count, 35)
+        mall_queries = {call.kwargs["params"]["q"] for call in self.get.call_args_list[1:]
+                        if "Северный пассаж" in call.kwargs["params"]["q"]}
+        self.assertEqual(len(mall_queries), 4)
+        self.completion.assert_called_once()
+
+    def test_rejected_raw_names_do_not_consume_usable_pool_capacity(self):
+        titles = [f"Test Museum {number}" for number in range(28)]
+        def get(url, **kwargs):
+            title = kwargs["params"]["q"].split(",", 1)[0]
+            index = titles.index(title)
+            return response([] if index < 10 else [record(title, index + 1)])
+        self.get.side_effect = get
+        result = self.run_pool(titles, days=5)
+        self.assertEqual((len(result.candidates), result.map_requests), (18, 28))
+        self.assertEqual(result.status, "success")
+        self.assertEqual(len(result.rejected), 10)
+        self.completion.assert_called_once()
+
+    def test_usable_pool_cap_is_separate_from_larger_raw_budget(self):
+        titles = [f"Test Museum {number}" for number in range(28)]
+        def get(url, **kwargs):
+            title = kwargs["params"]["q"].split(",", 1)[0]
+            return response([record(title, titles.index(title) + 1)])
+        self.get.side_effect = get
+        result = self.run_pool(titles, days=5)
+        self.assertEqual((len(result.candidates), result.map_requests), (18, 18))
+        self.assertEqual(self.completion.call_args.kwargs["json_schema"]["properties"]["titles"]["maxItems"], 28)
+
+    def test_large_unconfirmed_source_list_reserves_one_successful_ai_supplement(self):
+        seeds = [f"Source Museum {index}" for index in range(28)]
+        self.hints.return_value = [{"title": title, "source_url": "https://example.invalid/name"} for title in seeds]
+        supplement = "Supplement Museum"
+        self.completion.return_value.text = json.dumps({"titles": [supplement]})
+        def get(url, **kwargs):
+            title = kwargs["params"]["q"].split(",", 1)[0]
+            return response([record(title)] if title == supplement else [])
+        self.get.side_effect = get
+        result = candidates.ground_city_candidates(request(5), CENTER, completion=self.completion,
+                                                   allow_partial_program=True)
+        self.assertEqual((result.status, [item.title for item in result.candidates]), ("success", [supplement]))
+        self.completion.assert_called_once()
+        self.assertEqual(result.map_requests, 28)
+        context = json.loads(self.completion.call_args.args[0][1]["content"])
+        self.assertEqual([hint["title"] for hint in context["source_name_hints"]], seeds[:9])
+        self.assertEqual(context["remaining_name_slots"], 19)
+        self.assertEqual(result.diagnostics, {"attempted_names": 28, "name_limit": 28,
+                                             "usable_limit": 18, "limits_reached": ["name_limit"]})
+
+    def test_source_network_failures_cannot_exhaust_http_before_ai_supplement(self):
+        seeds = [f"Source Museum {index}" for index in range(36)]
+        self.hints.return_value = [{"title": title, "source_url": "https://example.invalid/name"} for title in seeds]
+        supplement = "Supplement Museum"
+        self.completion.return_value.text = json.dumps({"titles": [supplement]})
+        queried = []
+        def get(url, **kwargs):
+            title = kwargs["params"]["q"].split(",", 1)[0]
+            queried.append(title)
+            if title == supplement:
+                return response([record(title)])
+            raise httpx.ConnectTimeout("offline")
+        self.get.side_effect = get
+        result = candidates.ground_city_candidates(request(7), CENTER, completion=self.completion,
+                                                   allow_partial_program=True)
+        self.assertEqual((result.map_requests, len(result.candidates)), (36, 1))
+        self.assertEqual(queried.index(supplement), 18)
+        self.assertEqual(result.diagnostics["limits_reached"], ["http_limit"])
+        self.completion.assert_called_once()
+
+    def test_ai_failure_still_checks_deferred_source_names_within_shared_budget(self):
+        seeds = [f"Source Museum {index}" for index in range(12)]
+        self.hints.return_value = [{"title": title, "source_url": "https://example.invalid/name"} for title in seeds]
+        self.completion.side_effect = RuntimeError("offline synthetic failure")
+        def get(url, **kwargs):
+            title = kwargs["params"]["q"].split(",", 1)[0]
+            return response([record(title)] if title == seeds[-1] else [])
+        self.get.side_effect = get
+        result = candidates.ground_city_candidates(request(), CENTER, completion=self.completion,
+                                                   allow_partial_program=True)
+        self.assertEqual((result.status, [item.title for item in result.candidates]), ("success", [seeds[-1]]))
+        self.assertEqual(result.map_requests, 12)
+        self.assertTrue(result.warnings)
+        self.completion.assert_called_once()
+
+    def test_ekaterinburg_public_name_hints_survive_overpass_502_and_leave_room_for_museum(self):
+        city = "Екатеринбург"
+        titles = ["Гринвич", "Пассаж", "Радуга Парк"]
+        museum = "Тестовый художественный музей"
+        self.hints.side_effect = name_hints.destination_name_hints
+        self.completion.return_value.text = json.dumps({"titles": [museum]}, ensure_ascii=False)
+        def get(url, **kwargs):
+            if url == candidates._SHOPPING_DISCOVERY_URL:
+                raise httpx.HTTPStatusError("Synthetic 502", request=httpx.Request("GET", url),
+                                            response=httpx.Response(502))
+            title = kwargs["params"]["q"].split(",", 1)[0]
+            self.assertIn(title, titles + [museum])
+            # Deliberately synthetic coordinates; the real sources supply names only.
+            return response([record(title, (titles + [museum]).index(title) + 1,
+                                    category="tourism" if title == museum else "shop",
+                                    type="museum" if title == museum else "mall",
+                                    display_name=f"{title}, {city}, Россия",
+                                    address={"city": city, "country": "Россия", "country_code": "ru"})])
+        self.get.side_effect = get
+        result = candidates.ground_city_candidates(
+            request(5, destination=f"{city}, Россия", interest_categories=["museums", "shopping_malls"]),
+            {**CENTER, "name": city}, completion=self.completion, allow_partial_program=True)
+        self.assertEqual((result.status, [item.title for item in result.candidates]), ("success", titles + [museum]))
+        self.assertEqual(result.map_requests, 5)
+        self.assertTrue(result.warnings)
+        self.completion.assert_called_once()
+        context = json.loads(self.completion.call_args.args[0][1]["content"])
+        self.assertEqual([hint["title"] for hint in context["source_name_hints"]], titles)
+        self.assertEqual(context["remaining_name_slots"], 25)
+
     def test_names_only_schema_has_request_specific_cap(self):
-        for days, expected in ((1, 6), (4, 12), (7, 18), (14, 18)):
+        for days, expected in ((1, 12), (4, 24), (7, 36), (14, 36)):
             with self.subTest(days=days):
                 self.run_pool([], days=days)
                 schema = self.completion.call_args.kwargs["json_schema"]
@@ -391,7 +644,7 @@ class CityCandidateTests(unittest.TestCase):
     def test_invalid_json_unknown_fields_nonfinite_and_excess_names_fail_before_map(self):
         for text in ("bad", '{"titles": [], "titles": []}', '{"titles": [NaN]}',
                      '{"titles": [], "indoor": true}', '{"titles": [true]}',
-                     json.dumps({"titles": ["Музей " + str(i) for i in range(7)]}),
+                     json.dumps({"titles": ["Музей " + str(i) for i in range(13)]}),
                      json.dumps({"titles": ["Музей, город"]}), json.dumps({"titles": ["Музей\nтест"]})):
             with self.subTest(text=text):
                 self.completion.return_value.text = text

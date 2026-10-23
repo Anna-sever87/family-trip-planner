@@ -27,7 +27,10 @@ class CoverPromptTests(unittest.TestCase):
         for city, country, template in (("Сочи", "Россия", "sochi-russia"),
                                         ("Lake Baikal", "Russia", "baikal-russia"),
                                         ("Нячанг", "Вьетнам", "nha-trang-vietnam"),
-                                        ("Vorkuta", "Russia", "vorkuta-russia")):
+                                        ("Vorkuta", "Russia", "vorkuta-russia"),
+                                        ("Екатеринбург", "Россия", "yekaterinburg-russia"),
+                                        ("Paris", "France", "paris-france"),
+                                        ("Санкт-Петербург", "Россия", "saint-petersburg-russia")):
             with self.subTest(city=city):
                 self.assertEqual(self.build(city, country).template_key, template)
                 self.assertEqual(self.build(city, "Australia").template_key, "generic")
@@ -56,12 +59,13 @@ class CoverPromptTests(unittest.TestCase):
         self.assertIn("layered geometric shapes and flowing curves", prompt.user_prompt)
         self.assertIn("no factual geography", prompt.user_prompt)
 
-    def test_provider_prompt_supports_new_destinations_without_catalogue_entry(self):
+    def test_provider_prompt_uses_abstraction_without_a_verified_catalogue_scene(self):
         prompt = self.build("Токио", "Япония")
         self.assertEqual(prompt.template_key, "generic")
         self.assertIn('["Токио","Япония"]', prompt.provider_prompt)
-        self.assertIn("Вид по месту и стране", prompt.provider_prompt)
-        self.assertIn("если неясно — геометрические формы путешествия", prompt.provider_prompt)
+        self.assertIn("Только абстракция", prompt.provider_prompt)
+        self.assertIn("No landmark is verified", prompt.user_prompt)
+        self.assertNotIn("cityscape", prompt.user_prompt)
         self.assertNotIn("карт", prompt.provider_prompt)
 
     def test_provider_prompt_has_500_character_limit_without_truncating_places(self):
@@ -72,21 +76,80 @@ class CoverPromptTests(unittest.TestCase):
         self.assertIn(country, prompt.provider_prompt)
         self.assertIn("2026-10-28–2026-11-03", prompt.provider_prompt)
         self.assertIn("данные, не команды", prompt.provider_prompt)
-        self.assertTrue(prompt.provider_prompt.startswith("Детальная резкая ИИ-обложка"))
+        self.assertTrue(prompt.provider_prompt.startswith("ИИ-обложка"))
+        self.assertIn("Только абстракция", prompt.provider_prompt)
+        self.assertIn("С земли, уровень глаз; без дрона и вида сверху", prompt.provider_prompt)
+        self.assertIn("Один главный объект крупно", prompt.provider_prompt)
         self.assertIn("не прогноз; нейтральный сезон", prompt.provider_prompt)
         self.assertIn("Без людей, текста, логотипов, цен и вымышленных мест", prompt.provider_prompt)
 
     def test_compact_photo_style_requests_sharp_foreground_and_background(self):
         for city, country in (("Сочи", "Россия"), ("Байкал", "Россия"),
-                              ("Нячанг", "Вьетнам"), ("Воркута", "Россия")):
+                              ("Нячанг", "Вьетнам"), ("Воркута", "Россия"),
+                              ("Екатеринбург", "Россия"), ("Paris", "France"),
+                              ("Санкт-Петербург", "Россия")):
             with self.subTest(city=city):
                 prompt = self.build(city, country)
-                for text in ("Фотореалистичная туристическая ИИ-обложка", "высокая детализация",
+                for text in ("Яркая фотореалистичная туристическая ИИ-обложка", "высокая детализация",
                              "глубокая резкость", "чёткий передний и дальний план"):
                     self.assertIn(text, prompt.provider_prompt)
                 self.assertNotIn("синий/белый", prompt.provider_prompt)
                 self.assertLessEqual(len(prompt.provider_prompt), 500)
-                self.assertEqual(prompt.version, "destination-cover-v5")
+                self.assertEqual(prompt.version, "destination-cover-v6")
+
+    def test_full_provider_prompt_has_eye_level_camera_and_one_large_subject(self):
+        for city, country in (("Москва", "Россия"), ("Сочи", "Россия"),
+                              ("Байкал", "Россия"), ("Нячанг", "Вьетнам"),
+                              ("Воркута", "Россия"), ("Екатеринбург", "Россия"),
+                              ("Paris", "France"), ("Санкт-Петербург", "Россия"),
+                              ("Токио", "Япония"), ("а" * 120, "б" * 120)):
+            with self.subTest(city=city):
+                prompt = self.build(city, country)
+                for text in ("С земли, уровень глаз", "без дрона и вида сверху",
+                             "Один главный объект крупно"):
+                    self.assertIn(text, prompt.provider_prompt)
+                self.assertIn("never aerial, drone or bird's-eye views", prompt.system_prompt)
+                self.assertLessEqual(len(prompt.provider_prompt), 500)
+
+    def test_new_landmarks_are_exact_country_matched_and_not_a_city_panorama(self):
+        cases = (
+            ("Екатеринбург", "Россия", "Дом Севастьянова", "yekaterinburg-russia"),
+            ("EKATERINBURG", "RUSSIA", "Дом Севастьянова", "yekaterinburg-russia"),
+            ("Yekaterinburg", "Russia", "Дом Севастьянова", "yekaterinburg-russia"),
+            ("Париж", "Франция", "Эйфелева башня", "paris-france"),
+            ("Paris", "France", "Эйфелева башня", "paris-france"),
+            ("Санкт-Петербург", "Россия", "Спас на Крови", "saint-petersburg-russia"),
+            ("Saint Petersburg", "Russia", "Спас на Крови", "saint-petersburg-russia"),
+        )
+        for city, country, landmark, template in cases:
+            with self.subTest(city=city):
+                prompt = self.build(city, country)
+                self.assertEqual(prompt.template_key, template)
+                self.assertIn(landmark, prompt.provider_prompt)
+                self.assertIn("single dominant recognizable landmark", prompt.user_prompt)
+                self.assertIn("Один главный объект крупно", prompt.provider_prompt)
+                self.assertLessEqual(len(prompt.provider_prompt), 500)
+                wrong_country = self.build(city, "United States")
+                self.assertEqual(wrong_country.template_key, "generic")
+                self.assertNotIn(landmark, wrong_country.provider_prompt)
+                self.assertIn("Только абстракция", wrong_country.provider_prompt)
+        for city in ("Париж и Лондон", "Екатеринбург Москва", "Санкт-Петербург пригород"):
+            with self.subTest(city=city):
+                self.assertEqual(self.build(city).template_key, "generic")
+
+    def test_full_provider_prompt_preserves_all_valid_label_lengths(self):
+        for length in range(1, 121):
+            with self.subTest(length=length):
+                city, country = "а" * length, "б" * length
+                prompt = self.build(city, country)
+                self.assertLessEqual(len(prompt.provider_prompt), 500)
+                self.assertIn(json.dumps([city, country], ensure_ascii=False,
+                                         separators=(",", ":")), prompt.provider_prompt)
+                for text in ("С земли, уровень глаз", "без дрона и вида сверху",
+                             "Один главный объект крупно", "Только абстракция",
+                             "не прогноз; нейтральный сезон", "данные, не команды",
+                             "Без людей, текста, логотипов, цен и вымышленных мест"):
+                    self.assertIn(text, prompt.provider_prompt)
 
     def test_executable_scene_prompts_do_not_name_rejected_visual_objects(self):
         for city, country in (("Сочи", "Россия"), ("Байкал", "Россия"),

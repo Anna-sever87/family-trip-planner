@@ -62,6 +62,29 @@ class CityVisitOptionsTests(unittest.TestCase):
         self.assertIn("hours", value.unknown_fields)
         self.assertEqual((value.allowed_dates, value.opening_windows, value.sources), (None, (), ()))
 
+    def test_shopping_centre_visit_is_estimated_with_no_invented_conditions(self):
+        for kind in ("mall", "shopping_centre"):
+            with self.subTest(kind=kind):
+                item = candidate("Test Shopping Centre", kind=kind)
+                item.record["category"] = "shop"
+                value = options.visit_option(item, request(interest_categories=["shopping_malls"]))
+                self.assertIsNotNone(value)
+                self.assertEqual((value.duration_min, value.basis), (90, "planning_estimate"))
+                self.assertIsNone(value.indoor)
+                self.assertIsNone(value.estimated_cost)
+                self.assertEqual((value.allowed_dates, value.opening_windows, value.sources), (None, (), ()))
+                self.assertTrue({"price", "hours", "indoor"}.issubset(value.unknown_fields))
+                self.assertIn("покупки по желанию", value.description)
+                self.assertIn("Личные покупки не включены", value.description)
+                self.assertIn("не подтверждённая длительность", value.description)
+
+    def test_shopping_label_does_not_make_an_unrelated_map_type_a_visit(self):
+        for category, kind in (("building", "mall"), ("tourism", "shopping_centre"), ("shop", "supermarket")):
+            with self.subTest(category=category, kind=kind):
+                item = candidate("Test Shopping Centre", kind=kind)
+                item.record["category"] = category
+                self.assertIsNone(options.visit_option(item, request()))
+
     def test_fixed_duration_is_selected_estimate_not_product_cap_or_family_minimum(self):
         for kind, duration in (("museum", 90), ("park", 90), ("garden", 90), ("gallery", 90),
                                ("artwork", 30), ("monument", 30), ("place_of_worship", 30),

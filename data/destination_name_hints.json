@@ -210,6 +210,33 @@
     },
     {
       "aliases": [
+        "Екатеринбург",
+        "Екатеринбург, Россия",
+        "Екатеринбург, Свердловская область, Россия"
+      ],
+      "places": [
+        {
+          "title": "Гринвич",
+          "place_query": "Гринвич, Екатеринбург, Россия",
+          "locality": "Екатеринбург",
+          "source_url": "https://grinvich.com/contacts/"
+        },
+        {
+          "title": "Пассаж",
+          "place_query": "Пассаж, Екатеринбург, Россия",
+          "locality": "Екатеринбург",
+          "source_url": "https://passage.ru/contacts/"
+        },
+        {
+          "title": "Радуга Парк",
+          "place_query": "Радуга Парк, Екатеринбург, Россия",
+          "locality": "Екатеринбург",
+          "source_url": "https://radugapark.ru/kontakty/"
+        }
+      ]
+    },
+    {
+      "aliases": [
         "Кемер, Анталья, Турция",
         "Kemer, Antalya, Türkiye",
         "Kemer, Antalya, Turkey"

@@ -1,6 +1,7 @@
 """The new pipeline never pays an AI to repair a server-owned timetable."""
 
 from contextlib import ExitStack
+import json
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -14,13 +15,14 @@ from test_city_candidate_planner import default_candidates, request
 
 
 class DeterministicIntegrationTests(unittest.TestCase):
-    def run_plan(self, *, builder=None, validators=None, trip_request=None, selection_response=None):
+    def run_plan(self, *, builder=None, validators=None, trip_request=None, selection_response=None,
+                 candidate_result=None):
         candidates = default_candidates()
         center = {"lat": 55.0, "lon": 83.0, "name": "Тестгород", "country_code": "RU"}
 
         def ground(req, resolved, *, completion, **kwargs):
             completion([{"role": "user", "content": "Synthetic names only"}])
-            return CityCandidateResult(candidates=candidates)
+            return candidate_result if candidate_result is not None else CityCandidateResult(candidates=candidates)
 
         with ExitStack() as stack:
             stack.enter_context(patch("httpx.get", side_effect=AssertionError("No network")))
@@ -123,6 +125,73 @@ class DeterministicIntegrationTests(unittest.TestCase):
         self.assertEqual(result.generation_status, "unsupported_preferences")
         self.assertEqual(result.attempts, 0)
         completion.assert_not_called()
+
+    def test_requested_shopping_reaches_final_calendar_not_only_ai_selection(self):
+        from test_city_deterministic import DeterministicCityTests
+        pool = DeterministicCityTests.shopping_pool()
+        value = request()
+        value.interest_categories = ["museums", "shopping_malls"]
+        result, completion = self.run_plan(trip_request=value,
+            candidate_result=CityCandidateResult(candidates=pool), selection_response=json.dumps({
+                "status": "selected", "candidate_ids": [item.candidate_id for item in pool]}))
+        self.assertEqual(result.problems, [])
+        self.assertEqual(result.generation_status, "success")
+        self.assertTrue(result.generation_coverage["requested_category_satisfied"])
+        self.assertTrue(any(item.place_query == pool[-1].place_query
+                            for day in result.itinerary.days for item in day.items))
+        self.assertEqual(completion.call_count, 2)
+
+    def test_explicit_shopping_exclusion_beats_checkbox_in_final_schedule(self):
+        from test_city_deterministic import DeterministicCityTests
+        pool = DeterministicCityTests.shopping_pool()
+        value = request()
+        value.interest_categories = ["museums", "shopping_malls"]
+        value.wishes = "Без торговых центров"
+        result, completion = self.run_plan(trip_request=value,
+            candidate_result=CityCandidateResult(candidates=pool), selection_response=json.dumps({
+                "status": "selected", "candidate_ids": [item.candidate_id for item in pool[:-1]]}))
+        self.assertEqual(result.problems, [])
+        self.assertEqual(result.generation_coverage["requested_category_candidates"], 0)
+        self.assertFalse(any(item.place_query == pool[-1].place_query
+                             for day in result.itinerary.days for item in day.items))
+        self.assertEqual(completion.call_count, 2)
+
+    def test_missing_confirmed_mall_is_disclosed_without_rejecting_valid_trip(self):
+        value = request()
+        value.interest_categories = ["museums", "shopping_malls"]
+        result, completion = self.run_plan(trip_request=value, selection_response=json.dumps({
+            "status": "selected", "candidate_ids": [item.candidate_id for item in default_candidates()]}))
+        self.assertEqual(result.problems, [])
+        self.assertEqual(result.generation_status, "success")
+        self.assertTrue(any("Не удалось подтвердить подходящий торговый центр" in tip
+                            for tip in result.itinerary.tips))
+        self.assertEqual(completion.call_count, 2)
+
+    def test_discovery_diagnostics_keep_only_safe_counters_and_static_user_warning(self):
+        marker = "synthetic-private-content-not-for-report"
+        pool = CityCandidateResult(candidates=default_candidates(), map_requests=12,
+            rejected=[{"title": marker, "reason": "name_mismatch", "detail": marker},
+                      {"reason": marker}, {"reason": {"text": marker}}],
+            warnings=[marker], diagnostics={"attempted_names": 14, "name_limit": 28,
+                "usable_limit": 18, "limits_reached": ["name_limit", marker], "wishes": marker})
+        result, _ = self.run_plan(candidate_result=pool)
+        self.assertFalse(result.problems)
+        self.assertEqual(result.generation_coverage["discovery"], {
+            "confirmed_candidates": 2, "rejected_count": 3,
+            "rejection_reasons": {"name_mismatch": 1, "other": 2}, "warning_count": 1,
+            "map_requests": 12, "attempted_names": 14, "name_limit": 28, "usable_limit": 18,
+            "limits_reached": ["name_limit"]})
+        self.assertIn(city_planner.DISCOVERY_WARNING, result.itinerary.tips)
+        self.assertNotIn(marker, json.dumps(result.generation_coverage, ensure_ascii=False))
+        self.assertNotIn(marker, result.itinerary.model_dump_json())
+
+    def test_invalid_diagnostic_types_cannot_leak_details_or_invent_counts(self):
+        pool = SimpleNamespace(candidates=[], rejected="not a list", warnings={"private": "text"},
+                               map_requests=True, diagnostics={"attempted_names": True,
+                                   "name_limit": -1, "usable_limit": "secret", "limits_reached": [{}, True]})
+        self.assertEqual(city_planner._discovery_diagnostics(pool), {
+            "confirmed_candidates": 0, "rejected_count": 0, "rejection_reasons": {},
+            "warning_count": 0, "map_requests": 0, "limits_reached": []})
 
 
 if __name__ == "__main__":

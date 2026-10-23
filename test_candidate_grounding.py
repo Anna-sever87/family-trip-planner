@@ -46,6 +46,15 @@ def record(query, *, lat=51.0, lon=101.0, poi_type="museum", **overrides):
 
 
 class CandidateGroundingTests(unittest.TestCase):
+    def test_only_dedicated_shopping_centre_tags_are_eligible(self):
+        for kind in ("mall", "shopping_centre"):
+            with self.subTest(kind=kind):
+                self.assertTrue(grounding._eligible_poi_type({"category": "shop", "type": kind}))
+                for category in ("place", "boundary", "building", "tourism", None):
+                    self.assertFalse(grounding._eligible_poi_type({"category": category, "type": kind}))
+        for kind in ("supermarket", "department_store", "retail", "clothes", "yes"):
+            self.assertFalse(grounding._eligible_poi_type({"category": "shop", "type": kind}))
+
     def setUp(self):
         self.cache = {}
         for name, value in (("_cache", self.cache),):

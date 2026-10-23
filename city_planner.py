@@ -39,6 +39,52 @@ MAP_ONLY_WARNING = (
     "посещения в помещении — оценки, не подтверждённые картой; уточните условия и часы работы перед поездкой. "
     "Нулевой резерв не означает бесплатный вход."
 )
+DISCOVERY_WARNING = (
+    "Подбор мест завершён с ограничениями: часть предложений не удалось проверить. "
+    "Маршрут использует подтверждённый набор; это не означает, что других мест в городе нет."
+)
+
+
+def _discovery_diagnostics(pool) -> dict:
+    """Only bounded counters and known categories; no titles/wishes/raw errors."""
+    known_reasons = {
+        "generic_name_or_non_visit", "limited_search_unconfirmed", "map_request_limit",
+        "map_unavailable_or_invalid_response", "nonlocal_cyrillic_proposal",
+        "shared_map_clock_unavailable", "unsupported_leading_punctuation",
+        "canonical_record_mismatch", "country_mismatch_or_missing", "invalid_coordinates",
+        "invalid_record", "missing_locality", "missing_provider_identity", "name_mismatch",
+        "name_type_conflict", "outside_city_radius", "unsupported_poi_type",
+    }
+    rejected = getattr(pool, "rejected", ())
+    rejected = rejected if isinstance(rejected, (list, tuple)) else ()
+    reasons = {}
+    for item in rejected[:1000]:
+        reason = item.get("reason") if isinstance(item, dict) else None
+        reason = reason if isinstance(reason, str) and reason in known_reasons else "other"
+        reasons[reason] = reasons.get(reason, 0) + 1
+    warnings = getattr(pool, "warnings", ())
+    diagnostics = {
+        "confirmed_candidates": min(len(pool.candidates), 1000),
+        "rejected_count": min(len(rejected), 1000),
+        "rejection_reasons": reasons,
+        "warning_count": min(len(warnings), 1000) if isinstance(warnings, (list, tuple)) else 0,
+    }
+    calls = getattr(pool, "map_requests", 0)
+    diagnostics["map_requests"] = calls if type(calls) is int and 0 <= calls <= 1000 else 0
+    raw = getattr(pool, "diagnostics", {})
+    if isinstance(raw, dict):
+        for key in ("attempted_names", "name_limit", "usable_limit"):
+            value = raw.get(key)
+            if type(value) is int and 0 <= value <= 1000:
+                diagnostics[key] = value
+        for key in ("name_limit_reached", "map_limit_reached", "usable_limit_reached"):
+            if type(raw.get(key)) is bool:
+                diagnostics[key] = raw[key]
+        limits = raw.get("limits_reached")
+        if isinstance(limits, (tuple, list)):
+            diagnostics["limits_reached"] = sorted({value for value in limits
+                if isinstance(value, str) and value in {"name_limit", "usable_limit", "http_limit"}})
+    return diagnostics
 
 
 def _incompatible_same_day_pairs(candidates) -> list[dict]:
@@ -92,6 +138,7 @@ def generate_city_itinerary(request: TripRequest, *, max_attempts: int = 3,
                    and day["rain_mm"] >= RAIN_MM]
 
     counts = {"calls": 0, "input": 0, "output": 0}
+    discovery = {}
 
     def bounded_completion(messages, **kwargs):
         if counts["calls"] >= max_attempts:
@@ -112,7 +159,7 @@ def generate_city_itinerary(request: TripRequest, *, max_attempts: int = 3,
             weather=weather, weather_text=weather_text,
             city_map_context=city_map_context,
             generation_status=status,
-            generation_coverage=dict(coverage or {}),
+            generation_coverage={**dict(coverage or {}), **({"discovery": dict(discovery)} if discovery else {})},
         )
 
     try:
@@ -121,6 +168,7 @@ def generate_city_itinerary(request: TripRequest, *, max_attempts: int = 3,
     except YandexAIError:
         return result(problems=["Сервис ИИ не завершил подбор мест. Маршрут не сохранён; повторных скрытых вызовов нет."],
                       status="ai_unavailable")
+    discovery = _discovery_diagnostics(pool)
     if pool.problems:
         return result(problems=pool.problems, status=getattr(pool, "status", "unknown"))
     if not pool.candidates:
@@ -134,7 +182,7 @@ def generate_city_itinerary(request: TripRequest, *, max_attempts: int = 3,
         # Never use a second, hidden AI scheduling
         # path when deterministic construction lacks enough verified inputs.
         from city_deterministic import build_deterministic_city_itinerary
-        from city_preferences import select_city_preferences
+        from city_preferences import select_city_preferences, shopping_preference, is_shopping_candidate
 
         selected = select_city_preferences(
             request, pool.candidates, memory_context=planner._prepare_memory_context(memory_context),
@@ -144,9 +192,12 @@ def generate_city_itinerary(request: TripRequest, *, max_attempts: int = 3,
             return result(problems=selected.problems, status=selected.status)
 
         blocked_places = planner._load_blocked_places(request.destination)
+        required_shopping = ([item.candidate_id for item in selected.candidates if is_shopping_candidate(item)]
+                             if shopping_preference(request) == "requested" else [])
         built = build_deterministic_city_itinerary(
             request, selected.candidates, rainy_dates, resolved_city=center,
             blocked_places=blocked_places, candidate_priority=selected.candidate_priority,
+            required_any_of_ids=required_shopping,
         )
         built.coverage.update(discovered_candidates=len(pool.candidates),
                               preference_candidates=len(selected.candidates))
@@ -154,6 +205,11 @@ def generate_city_itinerary(request: TripRequest, *, max_attempts: int = 3,
             return result(built.itinerary, built.problems, status=built.status,
                           coverage=built.coverage)
         itinerary = built.itinerary
+        for warning in getattr(selected, "warnings", ()):
+            if warning not in itinerary.tips:
+                itinerary.tips.append(warning)
+        if discovery["warning_count"] or discovery["rejected_count"]:
+            itinerary.tips.append(DISCOVERY_WARNING)
         records = {candidate.place_query: candidate.record for candidate in pool.candidates}
         problems = check_rules(itinerary, request, rainy_dates, allow_city_limited_program=True)
         problems += verify_itinerary(itinerary, verified_records=records)
