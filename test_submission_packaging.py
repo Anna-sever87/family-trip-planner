@@ -248,6 +248,14 @@ class SubmissionPackagingTests(unittest.TestCase):
                 self.assertIn("!" + name, allowed)
         packaging.check_docker_sources()
 
+    def test_single_trip_deletion_is_in_source_and_runtime_image(self):
+        name = "trip_deletion.py"
+        self.assertIn(name, packaging.RUNTIME_MODULES)
+        allowed = (packaging.ROOT / ".dockerignore").read_text(encoding="utf-8").splitlines()
+        self.assertIn("!" + name, allowed)
+        self.assertIn(packaging.ROOT / name, packaging.source_files())
+        packaging.check_docker_sources()
+
     def test_public_environment_template_defaults_to_closed_invitation_access(self):
         # Only the public template is read. Never inspect the operator's .env.
         settings = {}

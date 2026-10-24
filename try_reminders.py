@@ -1184,15 +1184,37 @@ def main() -> None:
             "от другого пользователя"
         )
 
-        try:
-            db.claim_reminder(
-                999999,
-                "d3",
-                base_time,
-            )
+        assert db.claim_reminder(
+            999999,
+            "d3",
+            base_time,
+        ) is False
 
-        except sqlite3.IntegrityError:
-            pass
+        with db.connect() as conn:
+            assert conn.execute(
+                "SELECT COUNT(*) FROM reminder_deliveries WHERE trip_id = ?",
+                (999999,),
+            ).fetchone()[0] == 0
+
+        _ok(
+            "устаревшее напоминание без поездки "
+            "не резервируется и не создаёт запись"
+        )
+
+        # Проверяем ограничение БД отдельно от защитного отказа claim_reminder.
+        try:
+            with db.connect() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO reminder_deliveries (
+                        trip_id, kind, status, attempts, claimed_at
+                    ) VALUES (?, ?, 'sending', 1, ?)
+                    """,
+                    (999999, "d3", base_time.isoformat()),
+                )
+
+        except sqlite3.IntegrityError as exc:
+            assert "FOREIGN KEY" in str(exc), str(exc)
 
         else:
             raise AssertionError(

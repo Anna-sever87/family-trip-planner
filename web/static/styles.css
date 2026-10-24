@@ -96,6 +96,8 @@ button, input, select, textarea, summary, a { -webkit-tap-highlight-color: trans
 .button-primary:hover { background: var(--blue-dark); box-shadow: 0 6px 16px rgba(51, 102, 232, .22); }
 .button-ghost { background: #fff; border-color: var(--line); color: var(--ink); }
 .button-ghost:hover { background: #f1f5fc; border-color: #b6c9e5; }
+.button-delete { background: #fff; border-color: #e2c9ca; color: #993d44; box-shadow: none; }
+.button-delete:hover { background: #fff4f3; border-color: #bb777d; }
 .button-small { padding: 10px 14px; font-size: 14px; }
 
 .trip-list-tools { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin: 24px 0 20px; }
@@ -143,7 +145,8 @@ button, input, select, textarea, summary, a { -webkit-tap-highlight-color: trans
 .trip-stat { min-width: 0; background: #f3f6fc; padding: 9px; border-radius: 8px; }
 .trip-stat strong { display: block; overflow: hidden; font-size: 14px; text-overflow: ellipsis; white-space: nowrap; }
 .trip-stat span { display: block; color: var(--muted); font-size: 11px; margin-top: 2px; }
-.trip-card-actions { display: flex; gap: 8px; margin-top: auto; padding-top: 4px; }
+.trip-card-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: auto; padding-top: 4px; }
+.trip-card-actions .button-delete { flex-basis: 100%; }
 .trip-card-actions .button:first-child { flex: 1; }
 .trip-card-actions .button { padding: 10px 12px; border-radius: 9px; font-size: 13px; }
 .trip-card-actions .button-primary { background: #194982; box-shadow: none; }
@@ -173,7 +176,7 @@ button, input, select, textarea, summary, a { -webkit-tap-highlight-color: trans
 .trip-header { display: flex; justify-content: space-between; align-items: end; gap: 22px; margin-bottom: 24px; }
 .trip-header h1 { font-size: clamp(26px, 2.8vw, 36px); margin-top: 0; }
 .trip-header-meta { color: var(--muted); font-size: 14px; line-height: 1.65; }
-.trip-header-actions { display: flex; gap: 10px; }
+.trip-header-actions { display: flex; flex-wrap: wrap; gap: 10px; }
 .trip-notes { margin-bottom: 22px; line-height: 1.6; font-size: 14px; overflow-wrap: anywhere; }
 .trip-notes p, .trip-notes li { white-space: pre-wrap; }
 .trip-notes p { margin: 0 0 12px; }

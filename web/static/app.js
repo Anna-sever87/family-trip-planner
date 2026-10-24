@@ -28,6 +28,8 @@ const state = {
   accessRefresh: null,
   accessRevision: 0,
   accessUnconfirmed: false,
+  deletingTrips: new Map(),
+  deletedTrips: new Set(),
 };
 
 const $ = (id) => document.getElementById(id);
@@ -306,6 +308,7 @@ function cancelTripCoverConfirmation(session) {
 }
 
 async function submitTripCover(session) {
+  if (state.deletingTrips.has(session.tripId) || state.deletedTrips.has(session.tripId)) return;
   if (!currentCoverView(session) || !session.confirming || session.posting || session.reading || session.submitted
       || session.status?.status !== "empty" || session.status.available !== true) return;
   session.confirming = false;
@@ -332,6 +335,7 @@ async function submitTripCover(session) {
 }
 
 async function setTripCoverHidden(session, hidden) {
+  if (state.deletingTrips.has(session.tripId) || state.deletedTrips.has(session.tripId)) return;
   if (!currentCoverView(session) || session.reading || session.posting || session.visibilityBusy
       || session.status?.status !== "ready" || typeof hidden !== "boolean"
       || session.status.hidden === hidden) return;
@@ -644,13 +648,80 @@ function groupTripsByYear(trips) {
 }
 
 async function loadTrips() {
+  const account = state.me;
   setLoading(true, "Загружаю поездки…");
   try {
     const payload = await api("/api/trips?limit=100");
-    state.trips = payload.trips || [];
+    if (state.me !== account) return;
+    state.trips = visibleTrips(payload.trips);
     renderTrips();
   } finally {
-    setLoading(false);
+    if (state.me === account) setLoading(false);
+  }
+}
+
+function visibleTrips(trips) {
+  return Array.isArray(trips) ? trips.filter((trip) => !state.deletedTrips.has(Number(trip.id))) : [];
+}
+
+function createDeleteTripButton(trip) {
+  const account = state.me;
+  const control = button("Удалить поездку", "button button-delete", () => deleteTrip(trip, account, control));
+  control.disabled = state.deletingTrips.has(Number(trip.id));
+  control.setAttribute("aria-label", `Удалить поездку №${trip.id}: ${trip.destination}`);
+  return control;
+}
+
+async function deleteTrip(trip, account = state.me, control = null) {
+  const id = Number(trip?.id);
+  if (!account || state.me !== account || !Number.isSafeInteger(id) || id <= 0
+      || state.deletingTrips.has(id) || state.deletedTrips.has(id)) return;
+  if (state.me.access?.allowed === false) { toast(ACCESS_DENIED_MESSAGE); return; }
+  if (state.creatingTrip || state.editingTrip) { toast("Дождитесь завершения создания или изменения маршрута."); return; }
+  const question = `Удалить поездку №${id} «${trip.destination}»?\n`
+    + `${formatDate(trip.start_date)} — ${formatDate(trip.end_date)}.\n\n`
+    + "Маршрут, чек-лист, серверная обложка и PDF будут удалены. Отменить удаление в кабинете нельзя. "
+    + "Общая память семьи и скачанные вами файлы останутся. Потраченные попытки не возвращаются.";
+  if (!window.confirm(question) || state.me !== account) return;
+  const operation = { account };
+  state.deletingTrips.set(id, operation);
+  if (control) { control.disabled = true; control.textContent = "Удаляю…"; }
+  try {
+    let result;
+    try {
+      result = await api(`/api/trips/${id}`, { method: "DELETE" });
+    } catch (error) {
+      if (state.me === account) toast(error.status ? error.message
+        : "Не удалось подтвердить удаление. Обновите список поездок перед повторной попыткой.");
+      return;
+    }
+    if (state.me !== account || state.deletingTrips.get(id) !== operation) return;
+    if (result?.deleted !== true || result.trip_id !== id) {
+      toast("Ответ об удалении не подтверждён. Обновите список поездок.");
+      return;
+    }
+    // A late list/detail response must not resurrect a confirmed deleted trip.
+    // These account-local tombstones are never persisted outside this tab.
+    state.deletedTrips.add(id);
+    state.trips = visibleTrips(state.trips);
+    state.coverCache.delete(id);
+    if (state.createdTripId === id) {
+      state.createdTripId = 0;
+      clearGenerationReceipt(account, state.generationReceipt);
+      $("savedTripNotice").hidden = true;
+    }
+    try {
+      renderTrips();
+      if (Number(state.trip?.id) === id) showTrips();
+      toast(result.cleanup_pending === true
+        ? "Поездка удалена из кабинета. Очистка её файлов ещё не завершена; сервис повторит её при следующем запуске."
+        : "Поездка удалена. Потраченные попытки не возвращаются.");
+    } catch (_) {
+      toast("Поездка удалена. Обновите страницу, чтобы обновить список.");
+    }
+  } finally {
+    if (state.deletingTrips.get(id) === operation) state.deletingTrips.delete(id);
+    if (control) { control.disabled = false; control.textContent = "Удалить поездку"; }
   }
 }
 
@@ -798,6 +869,7 @@ function createTripCard(trip) {
   actions.append(
     button("Открыть маршрут", "button button-primary", () => openTrip(trip.id)),
     button("PDF", "button button-ghost", () => { window.location.href = `/api/trips/${trip.id}/pdf`; }),
+    createDeleteTripButton(trip),
   );
   content.append(top, title, stats, actions);
   const cover = createTripCover(trip, false, cachedCover(trip.id)?.value);
@@ -816,11 +888,13 @@ function beginViewChange() {
 }
 
 async function openTrip(tripId, updateHash = true) {
+  if (state.deletedTrips.has(Number(tripId))) { toast("Эта поездка удалена."); return false; }
   const viewRevision = beginViewChange();
   setLoading(true, "Открываю маршрут…");
   try {
     const trip = await api(`/api/trips/${tripId}`);
     if (viewRevision !== state.viewRevision) return false;
+    if (state.deletedTrips.has(Number(trip.id))) return false;
     displayTrip(trip, updateHash);
     return true;
   } catch (error) {
@@ -834,6 +908,7 @@ async function openTrip(tripId, updateHash = true) {
 }
 
 function displayTrip(trip, updateHash = true) {
+  if (state.deletedTrips.has(Number(trip.id))) return false;
   state.trip = trip;
   state.selectedDay = trip.itinerary.days[0]?.day || 1;
   $("tripsView").hidden = true;
@@ -954,6 +1029,7 @@ const FREE_DAY_NOTE = "Свободный день: посещения не за
   + "Резерв на обед учтён в бюджете; дополнительные занятия и остальные расходы не включены.";
 
 function tripEditUnavailableReason() {
+  if (state.deletingTrips.has(Number(state.trip?.id))) return "Поездка удаляется. Дождитесь завершения операции.";
   if (state.trip?.edit_available !== false) return "";
   return state.trip.edit_unavailable_reason
     || "Редактирование этого городского маршрута пока недоступно. Маршрут сохранён без изменений.";
@@ -998,7 +1074,7 @@ function renderTripHeader() {
   }
   if (editReason) copy.append(node("p", "trip-header-meta", editReason));
   else if (state.trip.edit_scope_note) copy.append(node("p", "trip-header-meta", state.trip.edit_scope_note));
-  actions.append(pdf, edit);
+  actions.append(pdf, edit, createDeleteTripButton(state.trip));
   header.append(copy, actions);
 }
 
@@ -1509,6 +1585,11 @@ async function completeTripCreation(result, account, viewRevision, receipt = nul
   const savedTrip = result?.trip ?? result;
   const tripId = Number(savedTrip?.id);
   const hasId = Number.isInteger(tripId) && tripId > 0;
+  if (hasId && state.deletedTrips.has(tripId)) {
+    state.createdTripId = 0;
+    showSavedTripNotice(0, "Эта поездка уже удалена. Повторная генерация не запускалась.");
+    return true;
+  }
   // A successful POST must never become a second POST when subsequent reads fail.
   state.createdTripId = hasId ? tripId : 0;
   $("infoDialog").close();
@@ -1522,6 +1603,7 @@ async function completeTripCreation(result, account, viewRevision, receipt = nul
     if (!opened) {
       const detailRevision = state.viewRevision + 1;
       opened = await openTrip(tripId);
+      if (isCurrent() && state.deletedTrips.has(tripId)) return true;
       if (!opened && isCurrent() && state.viewRevision === detailRevision) showTrips();
     }
   }
@@ -1531,12 +1613,14 @@ async function completeTripCreation(result, account, viewRevision, receipt = nul
   try {
     const list = await api("/api/trips?limit=100");
     if (!isCurrent()) return;
-    state.trips = list.trips || [];
+    if (hasId && state.deletedTrips.has(tripId)) return true;
+    state.trips = visibleTrips(list.trips);
     state.yearPages.clear();
     renderTrips();
     listUpdated = true;
   } catch (_) { /* Saving has already succeeded; list refresh is independent. */ }
   if (!isCurrent()) return;
+  if (hasId && state.deletedTrips.has(tripId)) return true;
   if (opened && listUpdated) {
     $("savedTripNotice").hidden = true;
     toast(savedMessage);
@@ -1918,7 +2002,7 @@ async function refreshTripSummary(account = state.me) {
   try {
     const payload = await api("/api/trips?limit=100");
     if (state.me !== account) return;
-    state.trips = payload.trips || [];
+    state.trips = visibleTrips(payload.trips);
     renderTrips();
   } catch (_) {
     // Детальная страница уже обновлена; список обновится при следующем открытии.
@@ -1929,6 +2013,8 @@ async function logout() {
   beginViewChange();
   clearCoverState();
   clearGenerationReceipt();
+  state.deletingTrips.clear();
+  state.deletedTrips.clear();
   setNewTripBusy(false);
   state.me = null;
   state.accessRevision += 1;

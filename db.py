@@ -645,6 +645,21 @@ def init_db() -> None:
         if "destination_options_json" not in _column_names(conn, "generation_jobs"):
             conn.execute("ALTER TABLE generation_jobs ADD COLUMN destination_options_json TEXT NOT NULL DEFAULT '[]'")
 
+        # Exact-file cleanup survives a trip/account removal or process restart.
+        # Only server-validated basenames and a root fingerprint are retained,
+        # never user input, absolute paths, prompts or document contents.
+        conn.execute("""CREATE TABLE IF NOT EXISTS trip_file_cleanup (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            tg_id INTEGER NOT NULL,
+            account_key TEXT NOT NULL,
+            trip_id INTEGER NOT NULL,
+            kind TEXT NOT NULL CHECK(kind IN ('cover','pdf')),
+            file_name TEXT NOT NULL,
+            root_fingerprint TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            UNIQUE(kind,file_name,root_fingerprint)
+        )""")
+
         violation = conn.execute(
             "PRAGMA foreign_key_check"
         ).fetchone()
@@ -2253,6 +2268,11 @@ def claim_reminder(
         conn.execute(
             "BEGIN IMMEDIATE"
         )
+
+        # A candidate snapshot may have been read before an owner deleted it.
+        # Do not recreate a delivery or send from a stale trip snapshot.
+        if conn.execute("SELECT 1 FROM trips WHERE id=?", (trip_id,)).fetchone() is None:
+            return False
 
         row = conn.execute(
             """

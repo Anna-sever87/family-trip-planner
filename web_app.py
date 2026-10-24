@@ -22,6 +22,7 @@ import db
 import access_control
 import generation_jobs
 import trip_covers
+import trip_deletion
 import web_service
 from generation_feedback import generation_failure_reason
 from yandex_ai import YandexAIError
@@ -108,6 +109,7 @@ async def lifespan(_: FastAPI):
     db.init_db()
     generation_jobs.manager.start()
     trip_covers.manager.start()
+    await anyio.to_thread.run_sync(trip_deletion.cleanup_pending_files)
     try:
         yield
     finally:
@@ -494,6 +496,17 @@ async def create_trip(
 @app.get("/api/trips/{trip_id}")
 def trip_detail(trip_id: int, tg_id: int = Depends(get_current_user_id)) -> dict:
     return web_service.get_trip_detail(tg_id, trip_id)
+
+
+@app.delete("/api/trips/{trip_id}")
+def delete_trip(trip_id: int, http_request: Request, tg_id: int = Depends(require_csrf)) -> dict:
+    try:
+        return web_service.delete_trip(tg_id, trip_id, expected_account_key=http_request.state.account_key)
+    except trip_deletion.TripDeleteBusyError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    except trip_deletion.TripDeleteStorageError as error:
+        # This exception is possible only before the route deletion commits.
+        raise HTTPException(status_code=503, detail="Не удалось безопасно подготовить удаление файлов. Поездка сохранена.") from error
 
 
 @app.get("/api/trips/{trip_id}/cover")

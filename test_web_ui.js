@@ -1418,6 +1418,188 @@ function jobStatus(status = "running", tripId = null) {
   return { job_id: JOB_ID, status, trip_id: tripId, message: `Состояние: ${status}. Без повторной генерации.` };
 }
 
+function deletionBrowser() {
+  const ui = browser();
+  ui.state.trips = [detailTrip(101), detailTrip(102)];
+  ui.context.renderTrips = () => {};
+  ui.context.refreshAccountAccess = async () => true;
+  ui.confirmations = [];
+  ui.context.window.confirm = (message) => { ui.confirmations.push(message); return true; };
+  return ui;
+}
+
+test("trip deletion asks about the exact trip and cancellation makes no request", async () => {
+  const ui = deletionBrowser();
+  ui.context.window.confirm = (message) => { ui.confirmations.push(message); return false; };
+  ui.context.api = async () => assert.fail("cancel must not call an endpoint");
+  await ui.context.deleteTrip(ui.state.trips[0]);
+  assert.equal(ui.state.trips.length, 2);
+  assert.match(ui.confirmations[0], /№101.*Байкал/);
+  assert.match(ui.confirmations[0], /Отменить удаление.*нельзя/);
+  assert.match(ui.confirmations[0], /попытки не возвращаются/);
+});
+
+test("confirmed DELETE includes CSRF, removes only its trip and does not restore exhausted quota", async () => {
+  const ui = deletionBrowser();
+  ui.state.me.access = { allowed: true, owner: false, route_limit: 5, route_remaining: 0 };
+  ui.context.document.cookie = "family_trip_csrf=synthetic-csrf";
+  let calls = 0;
+  ui.context.fetch = async (url, options) => {
+    calls += 1;
+    assert.equal(url, "/api/trips/101");
+    assert.equal(options.method, "DELETE");
+    assert.equal(options.headers.get("X-CSRF-Token"), "synthetic-csrf");
+    return { ok: true, status: 200, headers: new Headers({ "content-type": "application/json" }),
+      json: async () => ({ deleted: true, trip_id: 101, cleanup_pending: false }) };
+  };
+  await ui.context.deleteTrip(ui.state.trips[0]);
+  assert.equal(calls, 1);
+  assert.deepEqual(Array.from(ui.state.trips, (x) => x.id), [102]);
+  assert.equal(ui.state.me.access.route_remaining, 0);
+  assert.ok(ui.state.deletedTrips.has(101));
+});
+
+test("double deletion click is single-flight and controls unlock on failure", async () => {
+  const ui = deletionBrowser();
+  const response = deferred();
+  const selected = ui.state.trips[0];
+  let calls = 0;
+  ui.context.api = async () => { calls += 1; return response.promise; };
+  const button = ui.context.createDeleteTripButton(selected);
+  const pending = ui.context.deleteTrip(selected, ui.state.me, button);
+  assert.equal(button.disabled, true);
+  await ui.context.deleteTrip(selected);
+  assert.equal(calls, 1);
+  response.reject(Object.assign(new Error("Сейчас формируется обложка"), { status: 409 }));
+  await pending;
+  assert.equal(ui.state.trips.length, 2);
+  assert.equal(button.disabled, false);
+  assert.equal(ui.state.deletingTrips.size, 0);
+  assert.match(ui.toasts.at(-1), /обложка/);
+});
+
+test("pending cleanup is a deleted route, not an invitation to regenerate or restore it", async () => {
+  const ui = deletionBrowser();
+  ui.state.trip = ui.state.trips[0];
+  ui.state.coverCache.set(101, { account: ui.state.me });
+  ui.context.api = async () => ({ deleted: true, trip_id: 101, cleanup_pending: true });
+  await ui.context.deleteTrip(ui.state.trip);
+  assert.equal(ui.state.trip, null);
+  assert.equal(ui.state.coverCache.has(101), false);
+  assert.equal(ui.location.hash, "#trips");
+  assert.match(ui.toasts.at(-1), /Поездка удалена.*Очистка/);
+});
+
+test("late deletion cannot navigate away from another currently opened route", async () => {
+  const ui = deletionBrowser();
+  const response = deferred();
+  ui.context.api = async () => response.promise;
+  const pending = ui.context.deleteTrip(ui.state.trips[0]);
+  const newer = ui.state.trips[1];
+  ui.state.trip = newer;
+  ui.state.viewRevision += 1;
+  ui.location.hash = "#trip/102";
+  response.resolve({ deleted: true, trip_id: 101 });
+  await pending;
+  assert.equal(ui.state.trip, newer);
+  assert.equal(ui.location.hash, "#trip/102");
+});
+
+test("late deletion and detached delete buttons cannot affect another account", async () => {
+  const ui = deletionBrowser();
+  const response = deferred();
+  let calls = 0;
+  ui.context.api = async () => { calls += 1; return response.promise; };
+  const stale = ui.context.createDeleteTripButton(ui.state.trips[1]);
+  const pending = ui.context.deleteTrip(ui.state.trips[0]);
+  ui.state.me = { name: "Other account" };
+  ui.state.trips = [detailTrip(201)];
+  stale.dispatch("click");
+  response.resolve({ deleted: true, trip_id: 101 });
+  await pending;
+  assert.equal(calls, 1);
+  assert.deepEqual(ui.state.trips.map((x) => x.id), [201]);
+  assert.equal(ui.state.deletedTrips.size, 0);
+});
+
+test("late list and detail responses cannot resurrect a confirmed deleted route", async () => {
+  const ui = deletionBrowser();
+  const list = deferred();
+  const detail = deferred();
+  const original = [...ui.state.trips];
+  ui.context.api = (url, options) => options?.method === "DELETE"
+    ? Promise.resolve({ deleted: true, trip_id: 101 }) : url.includes("?limit=") ? list.promise : detail.promise;
+  const loadingList = ui.context.loadTrips();
+  const loadingDetail = ui.context.openTrip(101);
+  await ui.context.deleteTrip(original[0]);
+  list.resolve({ trips: original });
+  detail.resolve(original[0]);
+  await Promise.all([loadingList, loadingDetail]);
+  assert.deepEqual(Array.from(ui.state.trips, (x) => x.id), [102]);
+  assert.equal(ui.state.trip, null);
+  assert.deepEqual(ui.renders, []);
+  await ui.context.completeTripCreation(original[0], ui.state.me, ui.state.viewRevision);
+  assert.equal(ui.state.trip, null);
+  assert.match(elementText(ui.element("savedTripNotice")), /уже удалена/);
+});
+
+for (const listFails of [false, true]) {
+  test(`deletion while creation refresh is pending cannot announce a saved route (failure=${listFails})`, async () => {
+    const ui = deletionBrowser();
+    const list = deferred();
+    const original = [...ui.state.trips];
+    ui.context.api = (url, options) => options?.method === "DELETE"
+      ? Promise.resolve({ deleted: true, trip_id: 101 }) : list.promise;
+    const completing = ui.context.completeTripCreation(original[0], ui.state.me, ui.state.viewRevision);
+    assert.equal(ui.state.trip.id, 101);
+    await ui.context.deleteTrip(original[0]);
+    if (listFails) list.reject(new Error("List unavailable"));
+    else list.resolve({ trips: original });
+    await completing;
+    assert.equal(ui.state.trip, null);
+    assert.equal(ui.state.createdTripId, 0);
+    assert.deepEqual(Array.from(ui.state.trips, (x) => x.id), [102]);
+    assert.equal(ui.element("savedTripNotice").hidden, true);
+    assert.ok(!ui.toasts.some((text) => /готов и сохранён/.test(text)));
+  });
+}
+
+for (const outcome of ["network", "wrong-id", "missing-confirmation", "not-found"]) {
+  test(`unconfirmed deletion (${outcome}) never removes the card or retries DELETE`, async () => {
+    const ui = deletionBrowser();
+    let calls = 0;
+    ui.context.api = async () => {
+      calls += 1;
+      if (outcome === "network") throw new Error("lost response");
+      if (outcome === "not-found") throw Object.assign(new Error("Поездка не найдена"), { status: 404 });
+      return outcome === "wrong-id" ? { deleted: true, trip_id: 102 } : { trip_id: 101 };
+    };
+    await ui.context.deleteTrip(ui.state.trips[0]);
+    assert.equal(calls, 1);
+    assert.equal(ui.state.trips.length, 2);
+    assert.equal(ui.state.deletedTrips.size, 0);
+  });
+}
+
+test("logout clears deletion tombstones for a later account", async () => {
+  const ui = deletionBrowser();
+  ui.state.deletedTrips.add(101);
+  ui.context.api = async () => ({ ok: true });
+  await ui.context.logout();
+  assert.equal(ui.state.deletedTrips.size, 0);
+  assert.equal(ui.state.deletingTrips.size, 0);
+});
+
+test("trip cards and route header expose a labelled delete action", () => {
+  const ui = browser();
+  const summary = { ...detailTrip(101), checklist: { done: 0, total: 2 }, days_count: 1, currency: "RUB" };
+  const card = ui.context.createTripCard(summary);
+  assert.match(elementText(card), /Удалить поездку/);
+  ui.state.trip = detailTrip(101);
+  ui.context.renderTripHeader();
+  assert.match(elementText(ui.element("tripHeader")), /Удалить поездку/);
+});
+
 function ambiguousCityStatus() {
   return { ...jobStatus("failed"), clarification: { kind: "city", attempt_used: false,
     options: ["Москва, Москва, Россия", "Москва, Тверская область, Россия"] } };

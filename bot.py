@@ -2162,35 +2162,68 @@ def handle_pdf(
 def handle_delete(
     message,
 ):
-    number = _trip_number(
-        message
-    )
+    chat_id = message.chat.id
+    if not _private_actor(message):
+        bot.send_message(chat_id, "Удаление поездки доступно только в личном чате с ботом.")
+        return
 
-    if number is None:
+    try:
+        number = _trip_number(message)
+    except (ValueError, OverflowError):
+        number = None
+
+    if number is None or number <= 0:
         bot.send_message(
-            message.chat.id,
+            chat_id,
             "Напишите номер поездки, "
             "например: /delete 3. "
             "Список: /trips",
         )
         return
 
-    if db.delete_trip(
-        number,
-        message.chat.id,
-    ):
-        bot.send_message(
-            message.chat.id,
-            f"Поездка №{number} удалена. "
-            "Сведения памяти о прошлой "
-            "поездке сохранены.",
+    # Privacy actions stay available after an invitation expires. The shared
+    # service checks ownership/account lifetime, active jobs and exact files.
+    import trip_deletion
+    import web_service
+
+    try:
+        account_key = db.get_account_key(message.from_user.id)
+        if not account_key:
+            bot.send_message(chat_id,
+                             "Профиль недоступен или его удаление ещё выполняется. "
+                             "Удаление поездки не запущено.")
+            return
+        result = web_service.delete_trip(
+            message.from_user.id, number, expected_account_key=account_key,
         )
-    else:
+    except web_service.TripNotFoundError:
         bot.send_message(
-            message.chat.id,
+            chat_id,
             "Такой поездки у вас нет. "
             "Список: /trips",
         )
+        return
+    except trip_deletion.TripDeleteBusyError:
+        bot.send_message(chat_id,
+                         "Сейчас выполняется операция с маршрутом, обложкой или напоминанием. "
+                         f"Дождитесь её завершения и повторите /delete {number}. Поездка сохранена.")
+        return
+    except trip_deletion.TripDeleteStorageError:
+        bot.send_message(chat_id,
+                         "Не удалось безопасно проверить файлы поездки. Поездка сохранена. "
+                         "Попробуйте позже или обратитесь к владельцу приложения.")
+        return
+    except Exception:
+        logger.warning("trip_delete_result_unconfirmed")
+        bot.send_message(chat_id,
+                         "Не удалось подтвердить результат удаления. Проверьте список /trips; "
+                         f"если поездка осталась, повторите /delete {number}.")
+        return
+
+    text = result["message"]
+    if result["cleanup_pending"]:
+        text += f" Повторить очистку файлов можно командой /delete {number}."
+    bot.send_message(chat_id, text)
 
 
 @bot.message_handler(

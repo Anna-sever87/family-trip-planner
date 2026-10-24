@@ -663,6 +663,16 @@ def get_trip_pdf(tg_id: int, trip_id: int) -> bytes:
     return build_trip_pdf(trip, db.get_checklist(trip_id))
 
 
+def delete_trip(tg_id: int, trip_id: int, *, expected_account_key: str) -> Dict[str, Any]:
+    """Free owner-bound deletion; paid-attempt quotas are neither used nor reset."""
+    import trip_deletion
+
+    try:
+        return trip_deletion.delete_owned_trip(tg_id, expected_account_key, trip_id)
+    except trip_deletion.TripDeleteNotFoundError as error:
+        raise TripNotFoundError("Поездка не найдена.") from error
+
+
 def set_checklist_done(tg_id: int, item_id: int, done: bool) -> Dict[str, Any]:
     changed = db.set_checklist_item_done(item_id, tg_id, done)
     if not changed:

@@ -170,6 +170,19 @@ class TripCovers:
         self.lock = threading.Lock()
         self.slots = threading.BoundedSemaphore(MAX_ACTIVE)
 
+    def configured_cache_dir(self):
+        """Resolve the shared cache without starting workers or changing jobs.
+
+        Telegram never starts this manager, but deletion must still use the
+        same IMAGE_CACHE_DIR as the web process. Explicit test overrides and
+        an already running manager retain their fixed directory.
+        """
+        if self._cache_override is not None:
+            return self._cache_override
+        if self.executor is not None:
+            return self.cache_dir
+        return Path(os.getenv("IMAGE_CACHE_DIR", "").strip() or "output/covers")
+
     def start(self):
         with self.lock:
             if self.closing:
