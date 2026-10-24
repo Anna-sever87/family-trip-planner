@@ -150,6 +150,81 @@ def _family_minimum(request: TripRequest) -> int | None:
     return 90 if min(request.children_ages) < 7 else 120
 
 
+def city_break_minutes(request: TripRequest) -> int:
+    """A planning pause, not a medical rule or an imposed afternoon nap."""
+    return 60 if request.children_ages and min(request.children_ages) < 7 else 20
+
+
+def desired_city_program_minutes(request: TripRequest) -> int | None:
+    """Soft visit-volume goal, deliberately separate from acceptance minima.
+
+    Adolescents use the adult preference. Do not inflate an individual visit,
+    reject an otherwise useful partial day or manufacture POIs to reach it.
+    Meals, breaks and transfer reserves do not count as visits.
+    """
+    if request.destination_kind != "city" or not _schedule_is_explicit(request):
+        return None
+    start, end = _time_minutes(request.start_time), _time_minutes(request.end_time)
+    if start is None or end is None or end <= start:
+        return None
+    pace = request.pace.strip().casefold()
+    percent = {"спокойный": 35, "средний": 50, "насыщенный": 65}.get(pace)
+    if percent is None:
+        return None
+    youngest = min(request.children_ages) if request.children_ages else 18
+    percent = max(20, percent - (20 if youngest < 7 else 10 if youngest < 13 else 0))
+    rounded = ((end - start) * percent + 1499) // 1500 * 15
+    cap = {"спокойный": 210, "средний": 300, "насыщенный": 360}[pace]
+    return max(0, min(rounded, cap, end - start - 60 - city_break_minutes(request)))
+
+
+def city_day_coverage(request: TripRequest, itinerary: Itinerary) -> dict:
+    """Observable soft quality; never an exception or a reason to erase a day."""
+    desired = desired_city_program_minutes(request)
+    if desired is None:
+        return {}
+    start, end = _time_minutes(request.start_time), _time_minutes(request.end_time)
+    # Do not demand a morning/afternoon split for a short or evening-only trip.
+    split_day = end - start >= 6 * 60 and start < 12 * 60 and end >= 16 * 60
+    tail = 120 if city_break_minutes(request) == 60 else 90
+    light = unbalanced = 0
+    for day in itinerary.days:
+        if day.day_mode == "free":
+            continue  # Already reported as an incomplete calendar.
+        visits = [item for item in day.items if item.kind == "attraction"]
+        light += sum(_duration(item) for item in visits) < desired
+        intervals = [value for item in visits if (value := _interval(item)) is not None]
+        meals = [value for item in day.items if item.kind == "meal"
+                 and (value := _interval(item)) is not None]
+        if split_day:
+            meal = meals[0] if len(meals) == 1 else (13 * 60, 14 * 60)
+            balanced = (any(left < meal[0] for left, _ in intervals)
+                        and any(left >= meal[1] for left, _ in intervals)
+                        and max((right for _, right in intervals), default=start) >= end - tail)
+            unbalanced += not balanced
+    reasons = (["day_program_light"] if light else []) + (["day_window_unbalanced"] if unbalanced else [])
+    return {"desired_program_minutes": desired, "light_program_days": light,
+            "unbalanced_program_days": unbalanced, "quality_reasons": reasons}
+
+
+def apply_city_day_coverage(request: TripRequest, itinerary: Itinerary, coverage: dict) -> None:
+    """Recompute after generation/edit; stale light-day reasons must disappear."""
+    observed = city_day_coverage(request, itinerary)
+    if not observed:
+        return  # Regional/legacy requests have no city-window preference.
+    previous_reasons = list(coverage.get("quality_reasons", []))
+    prior = [code for code in previous_reasons
+             if code not in {"day_program_light", "day_window_unbalanced"}]
+    current = observed.pop("quality_reasons", [])
+    coverage.update(observed)
+    coverage["quality_reasons"] = list(dict.fromkeys([*prior, *current]))
+    if current and coverage.get("quality_status") != "insufficient_data":
+        coverage["quality_status"] = "partial"
+    elif (coverage.get("quality_status") == "partial" and previous_reasons and not prior
+          and not current and all(day.day_mode != "free" for day in itinerary.days)):
+        coverage["quality_status"] = "complete"
+
+
 def _busy_minutes(items, start: int, end: int) -> int:
     """Union of meal/rest intervals clipped to the gap, never double-counted."""
     intervals = []

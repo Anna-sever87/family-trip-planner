@@ -8,14 +8,19 @@ import json
 
 import city_context
 from cover_prompts import CoverSubject, SUBJECT_KINDS, safe_subject_title
-import places
 from schemas import Itinerary, TripRequest
 
 
 _PRIORITY = {kind: rank for rank, kind in enumerate((
-    "castle", "palace", "cathedral", "monastery", "theatre", "monument",
-    "memorial", "church", "place_of_worship",
+    "castle", "palace", "cathedral", "monastery", "monument", "memorial",
+    "church", "place_of_worship", "museum", "gallery", "theatre", "attraction",
 ))}
+# A generic tourism tag is not evidence that a minor ride is a city landmark.
+# Named observation wheels remain eligible as visits, not as claimed city icons.
+_MINOR_RIDE_TYPES = frozenset({
+    "roller_coaster", "carousel", "swing_carousel", "drop_tower", "water_slide",
+    "bumper_car", "bumper_cars", "miniature_train", "train", "dark_ride", "boat_ride",
+})
 
 
 def select_saved_cover_subject(request_json, itinerary_json, *, destination, country,
@@ -23,7 +28,9 @@ def select_saved_cover_subject(request_json, itinerary_json, *, destination, cou
     """Choose one interesting actual visit; malformed/legacy data fail closed.
 
     Inputs must be the owner-scoped stored JSON, never HTTP request fields.
-    A valid but unused candidate, generic museum, mall or road is not enough.
+    Only actual visits are eligible. Their observed locality remains explicit:
+    a nearby settlement is never relabelled as the trip's destination city.
+    Category priority is visual suitability, not a claim of fame or popularity.
     """
     try:
         if (not isinstance(request_json, str) or len(request_json) > 250_000
@@ -45,19 +52,26 @@ def select_saved_cover_subject(request_json, itinerary_json, *, destination, cou
             kind = candidate.record.get("type")
             if kind not in SUBJECT_KINDS or candidate.place_query not in visits:
                 continue
+            tags = candidate.record.get("extratags", {})
+            if kind == "attraction" and tags.get("attraction") in _MINOR_RIDE_TYPES:
+                continue
             address = candidate.record.get("address", {})
-            # The route pool can include nearby settlements (up to 40 km).
-            # Never turn their landmark into an illustration of the named city.
-            locality = next((address.get(key) for key in ("city", "town", "village", "municipality")
-                             if address.get(key)), "")
-            if places._context_identity(locality) != places._context_identity(center["name"]):
+            # The canonical record already binds locality to the provider's
+            # address/query, and checks country/identity/radius. Radius alone
+            # does not establish membership in the destination municipality.
+            locality = candidate.area
+            local_country = address.get("country", "")
+            country_code = address.get("country_code", "")
+            if (not local_country or not isinstance(country_code, str)
+                    or country_code.lower() != center["country_code"]):
                 continue
             try:
                 title = safe_subject_title(candidate.title)
             except ValueError:
                 continue
             eligible.append((_PRIORITY[kind], title.casefold(), candidate.candidate_id,
-                             CoverSubject(title, kind, candidate.candidate_id, destination, country)))
+                             CoverSubject(title, kind, candidate.candidate_id, destination, country,
+                                          locality, local_country, country_code.lower())))
         return min(eligible, key=lambda entry: entry[:3])[3] if eligible else None
     except (ValueError, TypeError, KeyError, AttributeError, OverflowError, RecursionError):
         return None

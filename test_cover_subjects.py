@@ -12,17 +12,20 @@ with patch("dotenv.load_dotenv", return_value=False):
     from schemas import Itinerary, ItineraryDay, ItineraryItem, TripRequest
 
 
-def saved_fixture(specs=None, *, used=None):
-    request = TripRequest(destination="Тестгород, Россия", start_date="2099-10-20",
+def saved_fixture(specs=None, *, used=None, destination="Тестгород, Россия", center=None,
+                  country="Россия", country_code="ru", tags=None):
+    request = TripRequest(destination=destination, start_date="2099-10-20",
                           end_date="2099-10-23", budget=30000, wishes="private-family-information")
-    center = dict(name="Тестгород", lat=55.0, lon=83.0, country_code="ru")
+    center = center or dict(name="Тестгород", lat=55.0, lon=83.0, country_code="ru")
     candidates = []
     for index, (title, kind, locality) in enumerate(specs or [("Театр Северный", "theatre", "Тестгород")], 1):
-        query = f"{title}, {locality}, Россия"
+        query = f"{title}, {locality}, {country}"
         record = _canonical_record(title, dict(name=query, type=kind,
-            category="shop" if kind == "mall" else "historic", lat=55.0, lon=83.0,
+            category=({"mall": "shop", "museum": "tourism", "gallery": "tourism", "attraction": "tourism",
+                       "theatre": "amenity", "cinema": "amenity", "park": "leisure", "zoo": "tourism"}.get(kind, "historic")),
+            lat=center["lat"], lon=center["lon"], extratags=(tags or {}).get(index, {}),
             provider="osm", osm_type="way", osm_id=index,
-            address={"city": locality, "country": "Россия", "country_code": "ru"}), center)
+            address={"city": locality, "country": country, "country_code": country_code}), center)
         if record is None:
             raise AssertionError("Invalid synthetic fixture")
         candidates.append(CityCandidate(f"osm-way-{index}", title, record["place_query"], record["locality"], record))
@@ -35,6 +38,23 @@ def saved_fixture(specs=None, *, used=None):
             area=c.area, place_query=c.place_query, verified=True, lat=c.record["lat"], lon=c.record["lon"],
             official_name=c.record["name"], provider="osm") for c in selected])])
     return envelope, itinerary.model_dump(mode="json")
+
+
+def london_fixture(specs=None, *, used=None, tags=None):
+    """Observed London label/type combinations; synthetic IDs/coordinates/dates."""
+    return saved_fixture(specs or [
+        ("Тауэрский мост", "attraction", "Большой Лондон"),
+        ("London Eye", "attraction", "Greater London"),
+        ("British Museum", "museum", "Greater London"),
+        ("National Gallery", "gallery", "City of Westminster"),
+        ("Друри-Лейн", "theatre", "Вестминстер"),
+        ("Westfield", "mall", "Большой Лондон"),
+        ("London Zoo", "zoo", "Вестминстер"),
+        ("Hyde Park", "park", "City of Westminster"),
+        ("Odeon", "cinema", "Вестминстер"),
+    ], used=used, destination="Лондон, Британия",
+       center=dict(name="Лондон", country="Британия", lat=51.5, lon=-0.12, country_code="gb"),
+       country="United Kingdom", country_code="gb", tags=tags)
 
 
 def select_fixture(envelope, itinerary, **kwargs):
@@ -76,14 +96,62 @@ class SavedCoverSubjectTests(unittest.TestCase):
                 envelope, itinerary = saved_fixture([(title, kind, "Тестгород")])
                 self.assertEqual(select_fixture(envelope, itinerary).kind, kind)
 
-    def test_museum_mall_park_or_nearby_town_not_presented_as_city_landmark(self):
-        for title, kind, locality in (("Музей Северный", "museum", "Тестгород"),
-                                      ("Торговый центр Северный", "mall", "Тестгород"),
+    def test_mall_park_and_cinema_not_selected_as_visual_subject(self):
+        for title, kind, locality in (("Торговый центр Северный", "mall", "Тестгород"),
                                       ("Парк Северный", "park", "Тестгород"),
-                                      ("Дворец Северный", "palace", "Соседний город")):
+                                      ("Кинотеатр Северный", "cinema", "Тестгород")):
             with self.subTest(kind=kind, locality=locality):
                 envelope, itinerary = saved_fixture([(title, kind, locality)])
                 self.assertIsNone(select_fixture(envelope, itinerary))
+
+    def test_nearby_actual_visit_keeps_its_real_locality_not_destination_alias(self):
+        envelope, itinerary = saved_fixture([("Дворец Северный", "palace", "Соседний город")])
+        subject = select_fixture(envelope, itinerary)
+        self.assertEqual(subject.destination, "Тестгород")
+        self.assertEqual(subject.locality, "Соседний город")
+        self.assertEqual(subject.local_country, "Россия")
+        self.assertEqual(subject.country_code, "ru")
+        envelope, itinerary = saved_fixture([("Дворец Северный", "palace", "Соседний город")], used=[])
+        self.assertIsNone(select_fixture(envelope, itinerary))
+
+    def test_london_used_museum_gallery_theatre_and_named_attractions_keep_observed_addresses(self):
+        for index, expected in enumerate(("Большой Лондон", "Greater London", "Greater London",
+                                          "City of Westminster", "Вестминстер")):
+            with self.subTest(index=index):
+                envelope, itinerary = london_fixture(used=[index])
+                subject = select_fixture(envelope, itinerary, destination="Лондон", country="Британия")
+                self.assertIsNotNone(subject)
+                self.assertEqual(subject.locality, expected)
+                self.assertEqual(subject.local_country, "United Kingdom")
+                self.assertEqual(subject.country_code, "gb")
+                self.assertEqual(subject.candidate_id, f"osm-way-{index + 1}")
+        envelope, itinerary = london_fixture(used=[8])  # Unvisited eligible records do not authorize a cover.
+        self.assertIsNone(select_fixture(envelope, itinerary, destination="Лондон", country="Британия"))
+
+    def test_observed_minor_ride_is_not_promoted_but_named_observation_wheel_is_eligible(self):
+        for kind, allowed in (("carousel", False), ("roller_coaster", False), ("miniature_train", False),
+                              ("ferris_wheel", True)):
+            with self.subTest(kind=kind):
+                envelope, itinerary = london_fixture([("Synthetic Observation", "attraction", "Greater London")],
+                                                     tags={1: {"attraction": kind}})
+                result = select_fixture(envelope, itinerary, destination="Лондон", country="Британия")
+                self.assertEqual(result is not None, allowed)
+
+    def test_london_wrong_country_or_road_record_cannot_authorize_cover(self):
+        envelope, itinerary = london_fixture(used=[4])
+        for changed in ({"type": "residential"}, {"type": "building"},
+                        {"address": {"city": "London", "country": "United States", "country_code": "us"}}):
+            with self.subTest(changed=changed):
+                altered = deepcopy(envelope)
+                altered[city_context.CONTEXT_KEY]["candidates"][4]["record"].update(changed)
+                self.assertIsNone(select_fixture(altered, itinerary, destination="Лондон", country="Британия"))
+
+    def test_visual_type_priority_is_deterministic_not_an_inferred_popularity_claim(self):
+        envelope, itinerary = london_fixture()
+        result = select_fixture(envelope, itinerary, destination="Лондон", country="Британия")
+        self.assertEqual(result.kind, "museum")
+        envelope[city_context.CONTEXT_KEY]["candidates"].reverse()
+        self.assertEqual(select_fixture(envelope, itinerary, destination="Лондон", country="Британия"), result)
 
     def test_empty_itinerary_does_not_promote_unused_pool(self):
         envelope, itinerary = saved_fixture(used=[])

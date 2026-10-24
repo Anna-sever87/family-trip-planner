@@ -396,16 +396,18 @@ class DeterministicCityTests(unittest.TestCase):
         self.assertEqual(result.coverage["selected_unique_visits"], 3)
         self.assertEqual(result.coverage["enrichment_visits"], 1)
         self.assertEqual([item.duration_min for item in visits(result.itinerary)], [90, 90, 90])
-        self.assertEqual(result.coverage["quality_reasons"], ["incomplete_calendar", "insufficient_confirmed_places"])
+        self.assertEqual(result.coverage["quality_reasons"], ["incomplete_calendar", "insufficient_confirmed_places",
+                                                            "day_window_unbalanced"])
         self.assertNotIn("1 из 7", result.itinerary.summary)
         self.assertEqual(result.itinerary.program_report.selected_unique_visits, 3)
 
-    def test_rich_pool_gives_complete_seven_day_program(self):
+    def test_program_on_every_date_can_still_fall_short_of_desired_visit_volume(self):
         req, pool = request(7, start_time="10:00", end_time="18:00"), candidates(18)
         result = self.build(req, pool)
         self.assert_valid(result, req, pool)
-        self.assertEqual(result.coverage["quality_status"], "complete")
-        self.assertEqual(result.coverage["quality_reasons"], [])
+        self.assertEqual(result.coverage["quality_status"], "partial")
+        self.assertIn("day_program_light", result.coverage["quality_reasons"])
+        self.assertEqual(result.coverage["desired_program_minutes"], 240)
         self.assertEqual((result.coverage["program_days"], result.coverage["free_days"]), (7, 0))
         self.assertEqual(result.coverage["selected_unique_visits"], 18)
 
@@ -428,7 +430,11 @@ class DeterministicCityTests(unittest.TestCase):
                 self.assertTrue(result.coverage["search_complete"])
                 self.assertLess(result.coverage["states_explored"], 20000)
                 if priority:
-                    self.assertEqual(result.coverage["selected_ids_by_day"]["1"][:4], short_first[:4])
+                    # Ranking is retained, but not an instruction to force all
+                    # preferred visits before lunch or discard the reserve.
+                    self.assertEqual(result.coverage["selected_ids_by_day"]["1"][:3], short_first[:3])
+                    self.assertEqual({value for values in result.coverage["selected_ids_by_day"].values()
+                                      for value in values}, set(short_first))
 
     def test_partial_upper_bound_uses_family_target_and_does_not_override_rain_or_exact_dates(self):
         req, pool = request(7, start_time="11:00", end_time="20:00", children_ages=[5]), candidates(6)
@@ -454,7 +460,9 @@ class DeterministicCityTests(unittest.TestCase):
                 pool = candidates(24)
                 result = self.build(req, pool)
                 self.assert_valid(result, req, pool)
-                self.assertEqual(result.coverage["quality_status"], "complete")
+                self.assertEqual(result.coverage["quality_status"], "complete" if target == 180 else "partial")
+                if target == 240:
+                    self.assertIn("day_program_light", result.coverage["quality_reasons"])
                 self.assertEqual(result.coverage["program_days"], 7)
                 self.assertEqual(result.coverage["daily_program_target_minutes"], target)
                 self.assertLessEqual(result.coverage["states_explored"], 20000)
@@ -598,7 +606,8 @@ class DeterministicCityTests(unittest.TestCase):
         result = self.build(req, pool, required_category_groups=groups,
                             required_any_of_ids=groups["shopping_malls"])
         self.assert_valid(result, req, pool)
-        self.assertEqual((result.coverage["quality_status"], result.coverage["program_days"]), ("complete", 7))
+        self.assertEqual((result.coverage["quality_status"], result.coverage["program_days"]), ("partial", 7))
+        self.assertIn("day_program_light", result.coverage["quality_reasons"])
         chosen = {identifier for values in result.coverage["selected_ids_by_day"].values() for identifier in values}
         self.assertEqual(len(chosen), 24)
         for identifiers in groups.values():

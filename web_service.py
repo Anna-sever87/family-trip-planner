@@ -20,7 +20,7 @@ import generation_quality
 from anketa import MAX_TRIP_DAYS, PACES
 from checklist import build_checklist
 from city_rollout import CITY_MVP_DISCLOSURE, city_candidates_enabled, city_deterministic_enabled
-from city_estimates import city_unpriced_visit_note, unpriced_city_visit_count
+from city_estimates import budget_coverage, city_unpriced_visit_note, unpriced_city_visit_count
 from destination_scope import DestinationScopeError
 from generation_feedback import generation_failure_message, generation_failure_reason
 from verified_map_places import is_public_map_point, item_map_attribution
@@ -645,6 +645,7 @@ def get_trip_detail(tg_id: int, trip_id: int) -> Dict[str, Any]:
             "remaining": round(request.budget - planned_total, 2),
             "over_budget": planned_total > request.budget,
             "unpriced_visit_count": unpriced_city_visit_count(itinerary),
+            "coverage": budget_coverage(request, itinerary),
             "days": budget_days,
             "scope_note": _budget_scope_note(
                 request,

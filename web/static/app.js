@@ -1219,9 +1219,10 @@ function renderBudget() {
   const remaining = Number(budget.remaining);
   const overBudget = remaining < 0;
   const heading = node("div", "panel-heading compact");
-  heading.append(node("h2", "", overBudget ? "Превышение по плану" : "Остаток по плану"));
+  heading.append(node("h2", "", "Смета всей поездки"));
   panel.append(
     heading,
+    node("p", "budget-note", overBudget ? "Превышение бюджета по смете (предварительно)" : "Не распределено по смете (предварительно)"),
     node(
       "div",
       `budget-total${overBudget ? " over" : ""}`,
@@ -1240,6 +1241,8 @@ function renderBudget() {
   const meta = node("div", "budget-meta");
   meta.append(
     node("span", "", `Программа дня ${dayBudget.day}: ${formatMoney(dayBudget.day_total, budget.currency)}`),
+    node("span", "", `Нарастающий итог к концу дня ${dayBudget.day}, включая дорогу и жильё: ${formatMoney(dayBudget.planned_through_day, budget.currency)}`),
+    node("span", "", `Бюджет минус этот итог: ${formatMoney(dayBudget.remaining_after_day, budget.currency)}. Последующие дни здесь ещё не вычтены.`),
   );
   const breakdown = node("dl", "budget-breakdown");
   const fixedValue = (value) => Number(value) > 0
@@ -1256,14 +1259,32 @@ function renderBudget() {
     breakdown.append(row);
   });
   const unpricedNote = cityUnpricedVisitNote(state.trip.itinerary);
-  const scopeNote = budget.scope_note || "";
-  const priceDisclosure = unpricedNote && !scopeNote.includes(unpricedNote) ? ` ${unpricedNote}` : "";
+  const coverage = budget.coverage;
+  const disclosedAdmission = coverage && Array.isArray(coverage.missing)
+    && coverage.missing.some((entry) => entry && entry.message === unpricedNote);
+  const scopeNote = disclosedAdmission ? (budget.scope_note || "").replace(unpricedNote, "").trim() : (budget.scope_note || "");
+  const priceDisclosure = unpricedNote && !disclosedAdmission && !scopeNote.includes(unpricedNote) ? ` ${unpricedNote}` : "";
+  if (coverage && Array.isArray(coverage.missing) && coverage.missing.length) {
+    const warning = node("div", "budget-coverage");
+    warning.append(node("strong", "", "Смета неполная: что ещё нужно учесть"));
+    const list = node("ul");
+    coverage.missing.forEach((entry) => {
+      if (entry && typeof entry.message === "string") list.append(node("li", "", entry.message));
+    });
+    warning.append(list);
+    panel.append(warning);
+  }
   panel.append(
     track,
     meta,
     breakdown,
     node("p", "budget-note", `Общий бюджет: ${formatMoney(budget.limit, budget.currency)}. ${scopeNote}${priceDisclosure}`),
   );
+  if (coverage && Array.isArray(coverage.notes)) {
+    coverage.notes.forEach((note) => {
+      if (typeof note === "string") panel.append(node("p", "budget-note", note));
+    });
+  }
 }
 
 function renderChecklist() {

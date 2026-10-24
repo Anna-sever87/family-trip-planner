@@ -710,10 +710,13 @@ def ground_city_candidates(request: TripRequest, center: dict, *, completion: Ca
     result.diagnostics.update(map_discovery_status="not_requested", map_discovery_error="none",
                               category_fallback_status="not_requested", replenishment_attempted=False,
                               source_alternatives_confirmed=0)
-    from city_quality import _family_minimum
+    from city_quality import _family_minimum, desired_city_program_minutes
     from city_visit_options import visit_option
     from rules import program_depth_target
-    required_minutes = request.days_count * (_family_minimum(request) or program_depth_target(request) or 1)
+    minimum = _family_minimum(request) or program_depth_target(request) or 1
+    # Demand enough observed reserve for the requested pace, not merely the
+    # acceptance floor. All name/HTTP/candidate caps remain unchanged.
+    required_minutes = request.days_count * max(minimum, desired_city_program_minutes(request) or minimum)
     usable_limit = min(24, max(usable_limit, math.ceil(required_minutes / 60)))
     if code in _LOCAL_NAME_LANGUAGES:
         usable_limit = min(usable_limit, _LOCAL_MAX_TITLES)

@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from datetime import date, timedelta
 from itertools import combinations
 
-from city_quality import _family_minimum, city_candidate_may_have_shelter
+from city_quality import _family_minimum, city_break_minutes, city_candidate_may_have_shelter
 from city_visit_estimates import get_city_planning_cap
 from places import MAX_DAY_SPREAD_KM, distance_km
 from pricing import minimum_meal_cost
@@ -259,7 +259,8 @@ def build_city_free_day(request: TripRequest, number: int) -> ItineraryDay:
             ItineraryItem(time=clock(meal_time), kind="meal", title="Обед", duration_min=60,
                           description="Плановый резерв на обед для всей группы; заведение и цена не подтверждены.",
                           cost=minimum_meal_cost(request)),
-            ItineraryItem(time=clock(meal_time + 60), kind="rest", title="Отдых", duration_min=60,
-                          description="Свободное время для отдыха без запланированных посещений.", cost=0),
+            ItineraryItem(time=clock(meal_time + 60), kind="rest", title="Отдых",
+                          duration_min=city_break_minutes(request),
+                          description="Пауза по желанию. Остальное время свободного дня не заполнено посещениями.", cost=0),
         ],
     )

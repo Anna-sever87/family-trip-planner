@@ -17,7 +17,7 @@ from reportlab.platypus import Flowable, KeepTogether, PageBreak, Paragraph, Sim
 from schemas import Itinerary, ItineraryDay
 from verified_map_places import is_public_map_point, item_map_attribution
 from program_coverage import FREE_DAY_NOTE, program_report_text
-from city_estimates import UNPRICED_VISIT_LABEL, city_unpriced_visit_note, is_unpriced_city_visit
+from city_estimates import UNPRICED_VISIT_LABEL, budget_coverage, city_unpriced_visit_note, is_unpriced_city_visit
 
 _WINDIR = os.environ.get("WINDIR", "C:\\Windows")
 # Пары (обычный, жирный). Первый найденный вариант используется. Свой шрифт можно положить в папку fonts.
@@ -230,7 +230,7 @@ def build_trip_pdf(trip: Dict[str, Any], checklist: List[Dict[str, Any]]) -> byt
         ["Жильё за все ночи" + (" (не указано)" if not costs["lodging"] else ""), _money(costs["lodging"], currency)],
         ["Программа на месте (оценка)", f"около {_money(costs['program'], currency)}"],
         ["Общие расходы (оценка)", f"около {_money(costs['total'], currency)}"],
-        ["Остаток бюджета" if costs["remaining"] >= 0 else "Превышение бюджета", _money(abs(costs["remaining"]), currency)],
+        ["Не распределено по смете (предварительно)" if costs["remaining"] >= 0 else "Превышение бюджета (предварительно)", _money(abs(costs["remaining"]), currency)],
     ]
     budget_table = Table([[_p(label, small), _p(value, small)] for label, value in budget_rows],
                          colWidths=[11.5 * cm, 5.8 * cm])
@@ -243,12 +243,26 @@ def build_trip_pdf(trip: Dict[str, Any], checklist: List[Dict[str, Any]]) -> byt
     story += [Spacer(1, 8), budget_table,
               _p(f"На программу после дороги и жилья: {_money(costs['program_budget'], currency)}. "
                  "Если дорога или жильё не указаны, общий итог неполный. Цены программы ориентировочные, на всех участников.", small)]
-    if unpriced_note:
-        story.append(_p(unpriced_note, small))
+    budget_disclosure = budget_coverage(request, itinerary)
+    if budget_disclosure["missing"]:
+        story.append(_p("Смета неполная: что ещё нужно учесть", heading))
+        story.extend(_p(entry["message"], small) for entry in budget_disclosure["missing"])
+    story.extend(_p(note, small) for note in budget_disclosure["notes"])
 
+    program_through_day = 0.0
     for day in itinerary.days:
         story.append(PageBreak())
         story.append(_p(f"День {day.day} ({day.date}): {_clean(day.theme)}", heading))
+        day_total = round(sum(_amount(item.cost) for item in day.items), 2)
+        program_through_day = round(program_through_day + day_total, 2)
+        planned_through_day = round(costs["travel"] + costs["lodging"] + program_through_day, 2)
+        after_day = round(costs["budget"] - planned_through_day, 2)
+        story += [
+            _p(f"Программа дня: {_money(day_total, currency)} (предварительно).", bold_style),
+            _p(f"Нарастающий итог к концу дня, включая дорогу и жильё: {_money(planned_through_day, currency)}. "
+               f"Бюджет минус этот итог: {_money(after_day, currency)}; последующие дни ещё не вычтены.", small),
+            Spacer(1, 6),
+        ]
         if day.day_mode == "free":
             story += [_p("Свободный режим", bold_style), _p(FREE_DAY_NOTE, base), Spacer(1, 6)]
         if day.base_area:

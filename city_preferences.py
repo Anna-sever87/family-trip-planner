@@ -167,10 +167,11 @@ def select_city_preferences(request, candidates, *, memory_context="", completio
         },
         "required": ["status", "candidate_ids"],
     }
-    from city_quality import _family_minimum
+    from city_quality import _family_minimum, desired_city_program_minutes
     from rules import program_depth_target
 
-    daily_target = _family_minimum(request) or program_depth_target(request) or 1
+    minimum = _family_minimum(request) or program_depth_target(request) or 1
+    daily_target = max(minimum, desired_city_program_minutes(request) or minimum)
     required_minutes = daily_target * request.days_count
     public, eligible_minutes = [], {}
     for item in candidates:
@@ -346,8 +347,13 @@ def select_city_preferences(request, candidates, *, memory_context="", completio
         ], diagnostics=selection_diagnostics)
     selected_minutes = sum(eligible_minutes.get(identifier, 0) for identifier in identifiers)
     selected_eligible_count = sum(identifier in eligible_minutes for identifier in identifiers)
-    shortfall = (selected_minutes < required_minutes or selected_eligible_count < request.days_count)
-    rich_pool = pool_minutes >= required_minutes and len(eligible_minutes) >= request.days_count
+    # Even a reserve below the desired volume may contain enough useful visits
+    # for a substantially better trip. Raising the soft goal must not disable
+    # its one existing bounded review. Selecting the entire available reserve
+    # is not a selection failure: observable light days report that shortfall.
+    shortfall = (selected_minutes < min(required_minutes, pool_minutes)
+                 or selected_eligible_count < min(request.days_count, len(eligible_minutes)))
+    rich_pool = pool_minutes >= minimum * request.days_count and len(eligible_minutes) >= request.days_count
     diagnostics = {
         **selection_diagnostics, "selection_repair_attempted": False,
         "selection_repair_status": "not_attempted" if shortfall and rich_pool else "not_needed",

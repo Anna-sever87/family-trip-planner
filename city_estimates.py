@@ -6,6 +6,8 @@ The caller keeps original model responses as diagnostics and still runs every
 ordinary validation after this narrow presentation step. No I/O occurs here.
 """
 
+import math
+
 from schemas import Itinerary, TripRequest
 
 
@@ -35,6 +37,57 @@ def city_unpriced_visit_note(itinerary: Itinerary) -> str:
         f"Посещений с неуточнённой ценой: {count}. Итог предварительный и не включает "
         "неизвестную стоимость входа; нулевой резерв не означает бесплатный вход."
     )
+
+
+def budget_coverage(request, itinerary: Itinerary) -> dict:
+    """Describe known omissions, never repair prices or certify a complete budget.
+
+    Accept saved legacy request dictionaries as well as validated requests. Only
+    the explicit map-only city mode supports the narrower meal/transfer claims.
+    No saved values are changed and no provider is queried.
+    """
+    data = request.model_dump() if isinstance(request, TripRequest) else request
+    data = data if isinstance(data, dict) else {}
+    missing, notes = [], []
+
+    def positive(value):
+        try:
+            return not isinstance(value, bool) and math.isfinite(float(value)) and float(value) > 0
+        except (TypeError, ValueError, OverflowError):
+            return False
+
+    for key, code, label in (("travel_cost", "travel", "Дорога туда и обратно"),
+                             ("lodging_cost", "lodging", "Жильё")):
+        if not positive(data.get(key)):
+            missing.append({"code": code, "message": f"{label}: сумма не указана и не включена в итог."})
+    unpriced = city_unpriced_visit_note(itinerary)
+    if unpriced:
+        missing.append({"code": "admission", "message": unpriced})
+    if itinerary.city_schedule is True and itinerary.source_schedule is not True:
+        program_days = [day for day in itinerary.days if any(item.kind == "attraction" for item in day.items)]
+        no_transport = sum(not any(item.kind == "transport" and positive(item.cost) for item in day.items)
+                           for day in program_days)
+        if no_transport:
+            missing.append({"code": "local_transport", "message":
+                f"Денежный резерв на местный транспорт отдельно не рассчитан в {no_transport} днях программы. "
+                "Временной запас на переходы и переезды не является оплатой проезда; пешие переходы могут быть бесплатными."})
+        lunch_only = sum(
+            bool(meals := [item for item in day.items if item.kind == "meal"])
+            and all(item.title.strip().casefold() in {"обед", "lunch"} for item in meals)
+            for day in itinerary.days
+        )
+        if lunch_only:
+            missing.append({"code": "other_meals", "message":
+                f"В {lunch_only} днях на питание предусмотрен только обед. Завтраки, ужины и перекусы отдельно не рассчитаны."})
+        if any(item.kind == "meal" for day in itinerary.days for item in day.items):
+            notes.append("Питание — плановый резерв на всех участников, а не подтверждённая цена конкретного заведения.")
+        raw_interests = data.get("interest_categories")
+        interests = {value for value in raw_interests if isinstance(value, str)} if isinstance(raw_interests, (list, tuple, set)) else set()
+        if "shopping_malls" in interests:
+            notes.append("Покупки в торговых центрах и личные расходы в смету не включены.")
+        if {"theatre", "cinema"}.intersection(interests):
+            notes.append("Точки театров и кинотеатров на карте не подтверждают спектакль или сеанс: афишу, время и билеты нужно проверить отдельно.")
+    return {"status": "incomplete" if missing else "estimate", "missing": missing, "notes": notes}
 
 
 MEAL_ESTIMATE_DESCRIPTION = (

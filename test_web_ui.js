@@ -468,6 +468,33 @@ test("unknown-price canonical server text is literal and is not duplicated withi
   assert.ok(elementText(ui.element("tripNotes")).includes(note));
 });
 
+test("budget separates each day's running total from the whole-trip estimate and lists missing costs safely", () => {
+  const ui = browser();
+  ui.state.trip = detailTrip();
+  Object.assign(ui.state.trip.budget, { currency: "USD", limit: 20000, planned_total: 8124,
+    program_total: 124, remaining: 11876, travel_cost: 3000, lodging_cost: 5000,
+    days: [1, 2, 3, 4].map((day) => ({day, day_total: 31, planned_through_day: 8000 + day * 31,
+      remaining_after_day: 12000 - day * 31})),
+    coverage: {status: "incomplete", missing: [{code: "admission", message: "<b>Цена не уточнена</b>"}],
+      notes: ["<script>transport note</script>"]},
+  });
+  const before = JSON.stringify(ui.state.trip);
+  for (const day of [1, 2, 3, 4]) {
+    ui.state.selectedDay = day;
+    ui.context.renderBudget();
+    const text = elementText(ui.element("budgetPanel"));
+    assert.ok(text.includes("Смета всей поездки"));
+    assert.ok(text.includes("Смета неполная"));
+    assert.ok(text.includes(`Программа дня ${day}: ${ui.context.formatMoney(31, "USD")}`));
+    assert.ok(text.includes(ui.context.formatMoney(8000 + day * 31, "USD")));
+    assert.ok(text.includes(ui.context.formatMoney(12000 - day * 31, "USD")));
+    assert.ok(text.includes(ui.context.formatMoney(11876, "USD")), "whole-trip remaining stays invariant");
+    assert.ok(text.includes("<b>Цена не уточнена</b>"));
+    assert.ok(text.includes("<script>transport note</script>"));
+  }
+  assert.equal(JSON.stringify(ui.state.trip), before);
+});
+
 test("legacy, source and nonvisit zero costs never gain an unknown admission label", () => {
   const ui = browser();
   for (const flags of [{}, { city_schedule: false, source_schedule: true },

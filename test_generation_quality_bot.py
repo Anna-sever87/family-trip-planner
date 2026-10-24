@@ -63,7 +63,12 @@ class BotQualityPersistenceTests(unittest.TestCase):
         self.assertEqual(saved["quality_status"], "partial")
         self.assertEqual((saved["requested_days"], saved["program_days"], saved["free_days"]), (2, 1, 1))
         self.assertEqual(saved["selected_unique_visits"], 2)
-        self.assertEqual(saved["quality_reasons"], ["incomplete_calendar"])
+        # The stored program day contains only two morning visits. The edit
+        # must disclose both its missing dates and its observable lightness.
+        self.assertEqual(saved["quality_reasons"],
+                         ["day_program_light", "day_window_unbalanced", "incomplete_calendar"])
+        self.assertEqual((saved["desired_program_minutes"], saved["light_program_days"],
+                          saved["unbalanced_program_days"]), (300, 1, 1))
         self.assertEqual(saved["discovery"], {"map_requests": 5})
         self.assertEqual(stored, before)
         self.namespace["_finish_ai_claim"].assert_called_once_with("test-claim", True)

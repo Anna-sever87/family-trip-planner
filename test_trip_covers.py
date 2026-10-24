@@ -172,6 +172,44 @@ class TripCoversTests(unittest.TestCase):
         self.assertEqual(self.status(trip)["status"], "ready")
         self.assertEqual(len(self.rows("cover_attempts")), 1)
 
+    def test_london_cover_read_is_free_and_explicit_submit_keeps_actual_visit_location(self):
+        from test_cover_subjects import london_fixture
+        for index in (0, 1, 2, 3, 4):
+            with self.subTest(index=index):
+                envelope, itinerary = london_fixture(used=[index])
+                trip = db.save_trip(1, envelope, itinerary)
+                attempts = len(self.rows("cover_attempts"))
+                queued = len(self.manager.executor.calls)
+                before = Path(db.DB_PATH).read_bytes()
+                self.assertTrue(self.status(trip)["available"])
+                self.assertTrue(self.status(trip)["available"])
+                self.assertEqual(Path(db.DB_PATH).read_bytes(), before)
+                self.assertEqual(len(self.rows("cover_attempts")), attempts)
+                self.assertEqual(len(self.manager.executor.calls), queued)
+                self.assertEqual(self.submit(trip)["status"], "queued")
+                self.manager.executor.run_next()
+                prompt = self.submission.call_args.args[0]
+                subject = json.loads(prompt.user_prompt)["verified_subject"]
+                self.assertEqual(subject["locality"], itinerary["days"][0]["items"][0]["area"])
+                self.assertEqual(subject["country"], "United Kingdom")
+                self.assertIn('Поездка: ["Лондон","Британия"]', prompt.provider_prompt)
+                self.assertLessEqual(len(prompt.provider_prompt), 500)
+                self.assertNotIn("private-family-information", prompt.provider_prompt + prompt.user_prompt)
+                self.assertNotIn("Private or AI prose", prompt.provider_prompt + prompt.user_prompt)
+                self.assertEqual(self.status(trip)["status"], "ready")
+                self.assertEqual(len(self.rows("cover_attempts")), attempts + 1)
+                self.assertEqual(self.submit(trip)["status"], "ready")
+                self.assertEqual(len(self.rows("cover_attempts")), attempts + 1)
+
+    def test_no_subject_message_explains_selection_limit_not_absence_of_city_sights(self):
+        trip = self.save_trip(destination="London, United Kingdom")
+        state = self.status(trip)
+        self.assertEqual(state["reason"], "no_verified_subject")
+        self.assertIn("Не удалось выбрать", state["message"])
+        self.assertIn("не означает", state["message"])
+        self.assertIn("платная генерация не запускается", state["message"])
+        self.assertEqual(self.rows("cover_attempts"), [])
+
     def test_foreign_owner_cannot_use_or_inspect_saved_cover_subject(self):
         from test_cover_subjects import saved_fixture
         envelope, itinerary = saved_fixture()

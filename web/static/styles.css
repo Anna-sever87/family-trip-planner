@@ -235,7 +235,10 @@ button, input, select, textarea, summary, a { -webkit-tap-highlight-color: trans
 .budget-line { height: 8px; background: #e7edf7; border-radius: 999px; overflow: hidden; margin: 16px 0 12px; }
 .budget-line span { display: block; height: 100%; background: linear-gradient(90deg, #3366e8, #73a2ff); border-radius: inherit; }
 .budget-line span.over { background: linear-gradient(90deg, #d96045, #ef9b66); }
-.budget-meta { display: flex; justify-content: space-between; gap: 10px; font-size: 14px; }
+.budget-meta { display: grid; gap: 10px; font-size: 14px; line-height: 1.45; }
+.budget-coverage { margin: 14px 0; padding: 12px; border: 1px solid #e4c58b; border-radius: 12px; background: #fff8e9; color: #594019; font-size: 13px; line-height: 1.5; }
+.budget-coverage ul { margin: 8px 0 0; padding-left: 18px; }
+.budget-coverage li + li { margin-top: 7px; }
 .budget-program-total { display: flex; justify-content: space-between; gap: 10px; margin: 13px 0 0; padding-top: 11px; border-top: 1px solid var(--line); font-size: 14px; }
 .budget-note { color: var(--muted); font-size: 12px; line-height: 1.45; margin-bottom: 0; }
 .budget-breakdown { display: grid; gap: 9px; margin: 14px 0 0; font-size: 13px; }

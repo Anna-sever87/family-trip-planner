@@ -92,8 +92,10 @@ class MapFirstDiscoveryTests(unittest.TestCase):
         self.assertEqual(len(result.candidates), 24)
         self.assertTrue(all(result.diagnostics["category_counts"].values()))
         self.assertEqual(result.diagnostics["missing_categories"], [])
-        self.assertEqual(result.diagnostics["pool_quality"], "adequate")
-        self.assertGreaterEqual(result.diagnostics["planning_minutes"], result.diagnostics["required_planning_minutes"])
+        # All categories can be present while their short visit estimates still
+        # fall below the requested pace; category coverage alone is not fullness.
+        self.assertEqual(result.diagnostics["pool_quality"], "limited")
+        self.assertLess(result.diagnostics["planning_minutes"], result.diagnostics["required_planning_minutes"])
         self.assertTrue(result.diagnostics["replenishment_attempted"])
         self.assertLessEqual(result.map_requests, 36)
         self.assertEqual(result.usage["completion_calls"], 1)
@@ -249,20 +251,20 @@ class MapFirstDiscoveryTests(unittest.TestCase):
         self.assertEqual(result.status, "success")
         self.assertEqual(result.diagnostics["pool_quality"], "limited")
         self.assertEqual(result.diagnostics["planning_minutes"], 270)
-        self.assertEqual(result.diagnostics["required_planning_minutes"], 1260)
+        self.assertEqual(result.diagnostics["required_planning_minutes"], 1890)
         self.assertTrue(result.diagnostics["replenishment_attempted"])
 
     def test_longer_museum_pool_can_meet_volume_without_claiming_actual_schedule(self):
-        for i in range(18):
+        for i in range(21):
             self.add("museums", f"Музей Северный {i}", i + 1)
         result = self.pool(7, interest_categories=["museums"])
         self.assertEqual(result.diagnostics["pool_quality"], "adequate")
-        self.assertGreaterEqual(result.diagnostics["planning_minutes"], 1260)
+        self.assertGreaterEqual(result.diagnostics["planning_minutes"], 1890)
         self.assertNotIn("program_days", result.diagnostics)
 
     def test_usable_budget_scales_with_days_and_volume_without_expanding_http_cap(self):
-        for days, start, end, expected in ((1, "11:00", "20:00", 6), (5, "10:00", "18:00", 18),
-                                            (7, "11:00", "20:00", 24), (4, "08:00", "22:00", 16)):
+        for days, start, end, expected in ((1, "11:00", "20:00", 6), (5, "10:00", "18:00", 20),
+                                            (7, "11:00", "20:00", 24), (4, "08:00", "22:00", 20)):
             with self.subTest(days=days, start=start):
                 result = self.pool(days, start_time=start, end_time=end, interest_categories=["museums"])
                 self.assertEqual(result.diagnostics["usable_limit"], expected)
@@ -386,7 +388,7 @@ class MapFirstDiscoveryTests(unittest.TestCase):
         result = self.pool(7, interest_categories=["museums", "main_sights"])
         counts = result.diagnostics["category_counts"]
         self.assertEqual(counts["museums"], 20)
-        self.assertEqual(counts["main_sights"], 1)  # first tranche, not equal five-place quotas
+        self.assertEqual(counts["main_sights"], 2)  # reserve remains museum-led, not equal category quotas
         self.assertEqual(result.diagnostics["pool_quality"], "adequate")
         self.assertEqual(result.usage["completion_calls"], 1)
 

@@ -204,6 +204,8 @@ def evaluate_saved_city_quality(request, candidates, itinerary, prior=None) -> d
     discovery = safe_coverage(prior).get("discovery")
     if discovery:
         coverage["discovery"] = discovery
+    from city_quality import apply_city_day_coverage
+    apply_city_day_coverage(request, itinerary, coverage)
     return coverage
 
 
@@ -280,6 +282,9 @@ def generate_city_itinerary(request: TripRequest, *, max_attempts: int = 3,
             report["quality_status"] = ("partial" if any(day.day_mode == "free" for day in itinerary.days)
                                         else "complete")
         report.setdefault("quality_reasons", [])
+        if itinerary is not None and not problems:
+            from city_quality import apply_city_day_coverage
+            apply_city_day_coverage(request, itinerary, report)
         return planner.PlanResult(
             itinerary=itinerary if itinerary is not None else
                       Itinerary(title="Маршрут пока не составлен", summary="", days=[], tips=[]),
@@ -341,8 +346,9 @@ def generate_city_itinerary(request: TripRequest, *, max_attempts: int = 3,
                               preference_candidates=len(selected.candidates))
         built.coverage.update(selected.diagnostics)
         if selected.diagnostics.get("selection_depth_shortfall"):
-            # The original map pool met the planning-volume bound; the curated
-            # subset did not. Do not misattribute this to insufficient discovery.
+            # The original pool met the acceptance floor and offered more of
+            # the desired volume than the subset. Do not attribute the lost
+            # reserve solely to discovery; remaining light days are separate.
             reasons = [code for code in built.coverage.get("quality_reasons", [])
                        if code != "insufficient_confirmed_places"]
             built.coverage["quality_reasons"] = reasons

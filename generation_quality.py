@@ -17,6 +17,8 @@ REASONS = {
     "search_limit": "Достигнут установленный предел поиска; полнота подбора не гарантируется.",
     "schedule_constraints": "Не удалось совместить все посещения в допустимое расписание.",
     "requested_interest_missing": "Не все выбранные интересы удалось включить.",
+    "day_program_light": "На части дней запланирован сокращённый объём посещений; остальное время остаётся свободным.",
+    "day_window_unbalanced": "На части дней посещения сосредоточены в одной части заданного окна; оставшееся время не заполнено программой.",
     "selection_depth_shortfall": "После отбора осталось недостаточно подходящих посещений для всех дней; исходный поиск нашёл больше мест.",
     "selection_repair_failed": "Дополнительная проверка отбора не завершилась; сохранён ранее проверенный результат без автоматического повтора.",
 }
@@ -28,6 +30,7 @@ _COUNTS = {
     "planning_minutes", "required_planning_minutes",
     "selection_calls", "preference_planning_minutes", "pool_planning_minutes", "discovered_candidates", "preference_candidates",
     "source_alternatives_confirmed",
+    "desired_program_minutes", "light_program_days", "unbalanced_program_days",
 }
 _BOOLS = {"search_complete", "name_limit_reached", "map_limit_reached", "usable_limit_reached",
           "replenishment_attempted", "selection_repair_attempted", "selection_depth_shortfall"}

@@ -578,8 +578,8 @@ def main() -> None:
             assert 'id="tripResultsStatus" class="visually-hidden" aria-live="polite"' in page.text
             assert page.text.count('aria-pressed="false"') >= 2
             assert 'aria-pressed="true"' in page.text
-            assert "/static/styles.css?v=20261024-trip-delete" in page.text
-            assert "/static/app.js?v=20261024-trip-delete" in page.text
+            assert "/static/styles.css?v=20261024-london-quality" in page.text
+            assert "/static/app.js?v=20261024-london-quality" in page.text
             assert 'class="hero travel-hero"' in page.text
             assert "ИИ-иллюстрация путешествия" in page.text
             assert page.text.count("/static/favicon.svg?v=20261022-premium-travel") == 3
@@ -1155,6 +1155,7 @@ def main() -> None:
                 "remaining": 40.0,
                 "over_budget": False,
                 "unpriced_visit_count": 0,
+                "coverage": {"status": "estimate", "missing": [], "notes": []},
                 "days": [
                     {
                         "day": 1,

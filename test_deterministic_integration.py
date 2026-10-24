@@ -147,17 +147,18 @@ class DeterministicIntegrationTests(unittest.TestCase):
         self.assertFalse(result.problems)
         self.assertEqual((completion.call_count, result.attempts), (3, 3))
         report = result.generation_coverage
-        self.assertEqual((report["quality_status"], report["program_days"]), ("complete", 7))
+        self.assertEqual((report["quality_status"], report["program_days"]), ("partial", 7))
+        self.assertIn("day_program_light", report["quality_reasons"])
         self.assertTrue(report["selection_repair_attempted"])
         self.assertEqual(report["selection_repair_status"], "improved")
-        self.assertFalse(report["selection_depth_shortfall"])
+        self.assertTrue(report["selection_depth_shortfall"])
         self.assertEqual(report["selection_calls"], 2)
         self.assertEqual(report["preference_candidates"], 21)
         used = {item.place_query for day in result.itinerary.days for item in day.items if item.kind == "attraction"}
         self.assertFalse(used & {pool[index].place_query for index in (19, 20, 21)})
         initial = json.loads(completion.call_args_list[1].args[0][1]["content"])
         review = json.loads(completion.call_args_list[2].args[0][1]["content"])
-        self.assertEqual(initial["planning_depth"]["required_planning_minutes"], 1260)
+        self.assertEqual(initial["planning_depth"]["required_planning_minutes"], 1890)
         self.assertEqual(review["depth_review"]["selected_planning_minutes"], 360)
         self.assertEqual(review["depth_review"]["selected_candidate_ids"], first)
         self.assertEqual(set(completion.call_args.kwargs["json_schema"]["properties"]), {"status", "candidate_ids"})
@@ -356,7 +357,8 @@ class DeterministicIntegrationTests(unittest.TestCase):
             candidate_result=CityCandidateResult(candidates=pool), selection_response=json.dumps({
                 "status": "selected", "candidate_ids": [pool[0].candidate_id]}))
         self.assertFalse(result.problems)
-        self.assertEqual(result.generation_coverage["quality_status"], "complete")
+        self.assertEqual(result.generation_coverage["quality_status"], "partial")
+        self.assertIn("day_program_light", result.generation_coverage["quality_reasons"])
         self.assertEqual(result.generation_coverage["selected_unique_visits"], 4)
         self.assertTrue(all(item["status"] == "covered"
                             for item in result.generation_coverage["interest_coverage"].values()))
@@ -381,7 +383,8 @@ class DeterministicIntegrationTests(unittest.TestCase):
             candidate_result=CityCandidateResult(candidates=pool), selection_response=json.dumps({
                 "status": "selected", "candidate_ids": selected}))
         self.assertFalse(result.problems)
-        self.assertEqual(result.generation_coverage["quality_status"], "complete")
+        self.assertEqual(result.generation_coverage["quality_status"], "partial")
+        self.assertIn("day_program_light", result.generation_coverage["quality_reasons"])
         self.assertEqual(result.generation_coverage["interest_coverage"]["zoos"],
                          {"status": "covered", "confirmed_count": 4, "selected_count": 1})
         self.assertEqual({item.place_query for day in result.itinerary.days for item in day.items
@@ -394,7 +397,8 @@ class DeterministicIntegrationTests(unittest.TestCase):
         result, _ = self.run_plan(trip_request=value, selection_response=json.dumps({
             "status": "selected", "candidate_ids": [item.candidate_id for item in default_candidates()]}))
         self.assertFalse(result.problems)
-        self.assertEqual(result.generation_coverage["quality_status"], "complete")
+        self.assertEqual(result.generation_coverage["quality_status"], "partial")
+        self.assertIn("day_program_light", result.generation_coverage["quality_reasons"])
         for item in result.generation_coverage["interest_coverage"].values():
             self.assertEqual(item, {"status": "not_verifiable", "confirmed_count": 0, "selected_count": 0})
 
@@ -428,12 +432,13 @@ class DeterministicIntegrationTests(unittest.TestCase):
         report = result.generation_coverage
         self.assertEqual((report["selection_mode"], report["selection_calls"]), ("structured_preferences", 0))
         self.assertEqual(report["preference_candidates"], 24)
-        self.assertEqual((report["quality_status"], report["program_days"]), ("complete", 7))
+        self.assertEqual((report["quality_status"], report["program_days"]), ("partial", 7))
+        self.assertIn("day_program_light", report["quality_reasons"])
         self.assertLessEqual(report["states_explored"], 20000)
         self.assertFalse(report["selection_repair_attempted"])
         completion.assert_called_once()  # Discovery only.
 
-    def test_memory_ranking_cannot_turn_rich_pool_into_thin_partial_program(self):
+    def test_memory_ranking_cannot_discard_rich_pool_even_when_desired_volume_is_higher(self):
         value, pool, first, _ = self.depth_fixture()
         result, completion = self.run_plan(trip_request=value, memory_context="Справочные предпочтения",
             candidate_result=CityCandidateResult(candidates=pool),
@@ -442,7 +447,9 @@ class DeterministicIntegrationTests(unittest.TestCase):
         report = result.generation_coverage
         self.assertEqual((report["selection_mode"], report["memory_ranking_status"]), ("memory_ranking", "applied"))
         self.assertEqual((report["selection_calls"], report["preference_candidates"]), (1, 24))
-        self.assertEqual((report["quality_status"], report["program_days"]), ("complete", 7))
+        self.assertEqual((report["quality_status"], report["program_days"]), ("partial", 7))
+        self.assertIn("day_program_light", report["quality_reasons"])
+        self.assertFalse(report["selection_depth_shortfall"])
         self.assertFalse(report["selection_repair_attempted"])
         self.assertEqual(completion.call_count, 2)  # One discovery + one ranking; no depth review.
 

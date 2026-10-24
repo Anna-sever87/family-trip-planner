@@ -19,7 +19,9 @@ from city_context import build_city_context
 from city_coverage import build_city_free_day
 from city_estimates import label_city_estimates
 from city_evidence import UNKNOWN_INDOOR_NOTE, city_managed_tips
-from city_quality import _family_minimum, check_city_quality, city_candidate_may_have_shelter
+from city_quality import (_family_minimum, apply_city_day_coverage, check_city_quality,
+                          city_break_minutes, city_candidate_may_have_shelter,
+                          desired_city_program_minutes)
 from city_visit_estimates import check_city_visit_estimates, get_city_planning_cap
 from destination_name_hints import _https_source
 from places import MAX_DAY_SPREAD_KM, distance_km, verify_itinerary
@@ -177,31 +179,31 @@ def _checked_option(candidate, option, dates):
                   {key: tuple(sorted(set(values))) for key, values in windows.items()})
 
 
-def _free_minutes_after(start, reserve, meal_start):
+def _free_minutes_after(start, reserve, meal_start, pause_duration=120):
     """Advance a transfer reserve through free time, never through meal/rest."""
-    pause_end = meal_start + 120
+    pause_end = meal_start + pause_duration
     if start >= pause_end or start + reserve <= meal_start:
         return start + reserve
     before = max(0, meal_start - start)
     return pause_end + max(0, reserve - before)
 
 
-def _place_visit(start, duration, windows, meal_start, end):
+def _place_visit(start, duration, windows, meal_start, end, pause_duration=120):
     for opening, closing in windows:
         value = max(start, opening)
-        if value < meal_start + 120 and value + duration > meal_start:
-            value = meal_start + 120
+        if value < meal_start + pause_duration and value + duration > meal_start:
+            value = meal_start + pause_duration
         if value + duration <= min(closing, end):
             return value
     return None
 
 
 def _template(indices, visits, windows, start, end, distances, counter, group_limit,
-              *, attempt_limit=None):
+              *, attempt_limit=None, pause_duration=120, split_after=None, late_finish=None):
     # Necessary bounds only: prove impossible pairs before enumerating lunch
     # and permutations. Ignoring lunch here is optimistic, never a relaxation
     # of the actual schedule or a source of visitor conditions.
-    if sum(visits[index].duration for index in indices) + 120 > end - start:
+    if sum(visits[index].duration for index in indices) + pause_duration > end - start:
         return None
     # A spanning tree is a lower bound on any visiting order's total reserved
     # transfers, even with the non-metric zero-distance threshold. This rules
@@ -216,7 +218,7 @@ def _template(indices, visits, windows, start, end, distances, counter, group_li
         minimum_transfer += cost
         connected.add(reached)
         remaining.remove(reached)
-    if sum(visits[index].duration for index in indices) + 120 + minimum_transfer > end - start:
+    if sum(visits[index].duration for index in indices) + pause_duration + minimum_transfer > end - start:
         return None
     by_index = dict(zip(indices, windows))
     earliest_finish = {}
@@ -241,20 +243,20 @@ def _template(indices, visits, windows, start, end, distances, counter, group_li
             return None
     # Half-hour lunch alternatives plus source-window boundaries. The fallback
     # slots stay inside the requested day; they are reservations, not venues.
-    preferred = min(max(13 * 60, start), end - 120)
-    meal_slots = {preferred, start, end - 120}
-    meal_slots.update(range(((start + 29) // 30) * 30, end - 119, 30))
+    preferred = min(max(13 * 60, start), end - pause_duration)
+    meal_slots = {preferred, start, end - pause_duration}
+    meal_slots.update(range(((start + 29) // 30) * 30, end - pause_duration + 1, 30))
     for index, allowed in zip(indices, windows):
         for opening, closing in allowed:
-            meal_slots.update((max(start, min(end - 120, opening - 120)),
-                               max(start, min(end - 120, closing)),
-                               max(start, min(end - 120, max(start, opening) + visits[index].duration)),
-                               max(start, min(end - 120, min(end, closing) - visits[index].duration - 120))))
+            meal_slots.update((max(start, min(end - pause_duration, opening - pause_duration)),
+                               max(start, min(end - pause_duration, closing)),
+                               max(start, min(end - pause_duration, max(start, opening) + visits[index].duration)),
+                               max(start, min(end - pause_duration, min(end, closing) - visits[index].duration - pause_duration))))
     convenient = sorted(meal_slots, key=lambda value: (abs(value - preferred), value))
     # A half-hour grid alone can miss a feasible source window (e.g. lunch
     # starting 10:37). Try convenient slots first, then every other minute;
     # all attempts share the same strict global search budget.
-    meal_slots = convenient + sorted(set(range(start, end - 119)) - meal_slots,
+    meal_slots = convenient + sorted(set(range(start, end - pause_duration + 1)) - meal_slots,
                                     key=lambda value: (abs(value - preferred), value))
     group_started = counter.used
     for meal_start in meal_slots:
@@ -266,12 +268,25 @@ def _template(indices, visits, windows, start, end, distances, counter, group_li
             if not counter.take(group_limit):
                 return None
             cursor, starts, previous = start, [], None
-            for index in order:
+            for position, index in enumerate(order):
                 if previous is not None:
                     km = distances[tuple(sorted((previous, index)))]
                     gap = 0 if km <= .03 else max(TRANSFER_RESERVE_MINUTES, math.ceil(km))
-                    cursor = _free_minutes_after(cursor, gap, meal_start)
-                value = _place_visit(cursor, visits[index].duration, by_index[index], meal_start, end)
+                    cursor = _free_minutes_after(cursor, gap, meal_start, pause_duration)
+                if position == split_after:
+                    if previous is not None and distances[tuple(sorted((previous, index)))] <= .03:
+                        break  # Keep co-located visits together, not a fake return trip.
+                    cursor = max(cursor, meal_start + pause_duration)
+                    if late_finish is not None:
+                        suffix = order[position:]
+                        reserve = sum(0 if distances[tuple(sorted(pair))] <= .03 else
+                                      max(TRANSFER_RESERVE_MINUTES, math.ceil(distances[tuple(sorted(pair))]))
+                                      for pair in zip(suffix, suffix[1:]))
+                        desired_start = late_finish - sum(visits[value].duration for value in suffix) - reserve
+                        # At most one extra hour of open time, never a fake visit
+                        # or an inflated duration just to reach the end of a day.
+                        cursor = max(cursor, min(desired_start, cursor + 60))
+                value = _place_visit(cursor, visits[index].duration, by_index[index], meal_start, end, pause_duration)
                 if value is None:
                     break
                 starts.append(value)
@@ -283,7 +298,7 @@ def _template(indices, visits, windows, start, end, distances, counter, group_li
     return None
 
 
-def _make_day(number, day_date, template, visits, meal_cost):
+def _make_day(number, day_date, template, visits, meal_cost, rest_minutes=60):
     items = []
     for index, minute in zip(template.order, template.starts):
         visit = visits[index]
@@ -299,7 +314,9 @@ def _make_day(number, day_date, template, visits, meal_cost):
         ItineraryItem(time=_clock(template.meal_start), kind="meal", title="Обед", area=pause_area,
                       place_query="", description="Плановый резерв на обед.", duration_min=60, cost=meal_cost),
         ItineraryItem(time=_clock(template.meal_start + 60), kind="rest", title="Отдых", area=pause_area,
-                      place_query="", description="Пауза для отдыха.", duration_min=60, cost=0),
+                      place_query="", description=("Пауза для отдыха." if rest_minutes >= 60 else
+                                                   "Короткая пауза по желанию; дневной сон не предполагается."),
+                      duration_min=rest_minutes, cost=0),
     ))
     return ItineraryDay(day=number, date=day_date, theme="Городская программа",
                         items=sorted(items, key=lambda item: item.time))
@@ -426,6 +443,9 @@ def build_deterministic_city_itinerary(
 
     target = _family_minimum(request) or program_depth_target(request) or 1
     coverage["daily_program_target_minutes"] = target
+    desired = desired_city_program_minutes(request) or target
+    rest_minutes = city_break_minutes(request)
+    pause_duration = 60 + rest_minutes
     distances = {(left, right): distance_km(visits[left].candidate.record["lat"], visits[left].candidate.record["lon"],
                                            visits[right].candidate.record["lat"], visits[right].candidate.record["lon"])
                  for left, right in combinations(range(len(visits)), 2)}
@@ -503,7 +523,8 @@ def build_deterministic_city_itinerary(
                 windows = tuple(visits[index].windows.get(day_date, ()) if visits[index].windows
                                 else ((start, end),) for index in indices)
                 template = _template(indices, visits, windows, start, end, distances, counter,
-                                     seed_limit, attempt_limit=MAX_GROUP_SEARCH_STATES)
+                                     seed_limit, attempt_limit=MAX_GROUP_SEARCH_STATES,
+                                     pause_duration=pause_duration)
                 if template is None:
                     continue
                 def seed_score(value):
@@ -571,7 +592,8 @@ def build_deterministic_city_itinerary(
                 if key not in template_cache:
                     template_cache[key] = _template(indices, visits, windows, start, end,
                                                     distances, counter, group_limit,
-                                                    attempt_limit=MAX_GROUP_SEARCH_STATES)
+                                                    attempt_limit=MAX_GROUP_SEARCH_STATES,
+                                                    pause_duration=pause_duration)
                 if template_cache[key] is not None:
                     templates[day_index].append(template_cache[key])
                     template_masks[day_index].add(mask)
@@ -688,7 +710,12 @@ def build_deterministic_city_itinerary(
             break
         if spent + visits[extra].cost_cents > extra_budget:
             continue
-        for day_index, original in sorted(selected.items()):
+        # Enrich the lightest eligible day first instead of packing all spare
+        # visits into the beginning of the trip. Never remove a program day.
+        ordered_days = sorted(selected.items(), key=lambda pair: (
+            sum(visits[index].duration for index in pair[1].order) >= desired,
+            sum(visits[index].duration for index in pair[1].order), pair[0]))
+        for day_index, original in ordered_days:
             indices = tuple(sorted((*original.order, extra)))
             if len(indices) > max_visits or any(distances[pair] > MAX_DAY_SPREAD_KM
                                                for pair in combinations(indices, 2)):
@@ -703,13 +730,49 @@ def build_deterministic_city_itinerary(
             if any(not allowed for allowed in windows):
                 continue
             expanded = _template(indices, visits, windows, start, end, distances, counter,
-                                 max_states, attempt_limit=MAX_GROUP_SEARCH_STATES)
+                                 max_states, attempt_limit=MAX_GROUP_SEARCH_STATES,
+                                 pause_duration=pause_duration)
             if expanded is not None:
                 selected[day_index] = expanded
                 chosen.add(extra)
                 spent += visits[extra].cost_cents
                 enrichment_count += 1
                 break
+    # Place the SAME visits on both sides of lunch where sourced windows allow.
+    # This does not create capacity: sparse days stay partial below the desired
+    # volume, even if a visit can be moved to the afternoon.
+    if end - start >= 6 * 60 and start < 12 * 60 and end >= 16 * 60:
+        late_finish = end - (120 if rest_minutes == 60 else 90)
+        for day_index, original in sorted(selected.items()):
+            if len(original.order) < 2:
+                continue
+            indices = tuple(original.order)
+            if all(distances[tuple(sorted(pair))] <= .03 for pair in combinations(indices, 2)):
+                continue
+            day_date = dates[day_index]
+            windows = tuple(visits[index].windows.get(day_date, ()) if visits[index].windows
+                            else ((start, end),) for index in indices)
+            def balance_score(value):
+                return (any(minute < value.meal_start for minute in value.starts)
+                        and any(minute >= value.meal_start + pause_duration for minute in value.starts),
+                        min(late_finish, max(minute + visits[index].duration
+                                            for index, minute in zip(value.order, value.starts))))
+            best = original
+            # Existing fixed-size templates have at most five visits. Share the
+            # original bounded counter; exhausted search yields honest partial.
+            splits = sorted(range(1, len(indices)), key=lambda value: (abs(2 * value - len(indices)), -value))
+            for split in splits:
+                if counter.used >= max_states:
+                    counter.limited = True
+                    break
+                balanced = _template(indices, visits, windows, start, end, distances, counter, max_states,
+                                     attempt_limit=MAX_GROUP_SEARCH_STATES, pause_duration=pause_duration,
+                                     split_after=split, late_finish=late_finish)
+                if balanced is not None and balance_score(balanced) > balance_score(best):
+                    best = balanced
+                if balance_score(best) == (True, late_finish):
+                    break
+            selected[day_index] = best
     coverage.update(states_explored=counter.used, search_complete=not counter.limited,
                     program_days=len(selected), free_days=len(dates) - len(selected),
                     available_day_templates=sum(map(len, templates)),
@@ -741,7 +804,7 @@ def build_deterministic_city_itinerary(
             quality_reasons.append("schedule_constraints")
         coverage["quality_reasons"] = quality_reasons
 
-    days = [_make_day(index + 1, value, selected[index], visits, meal_cents / 100) if index in selected
+    days = [_make_day(index + 1, value, selected[index], visits, meal_cents / 100, rest_minutes) if index in selected
             else build_city_free_day(request, index + 1) for index, value in enumerate(dates)]
     itinerary = Itinerary(title=f"{request.destination}: предварительная городская программа",
                           summary="Расписание составлено сервером по проверенным местам и отдельно указанным "
@@ -783,6 +846,7 @@ def build_deterministic_city_itinerary(
         coverage["quality_status"] = "insufficient_data"
         coverage["quality_reasons"] = ["schedule_validation_failed"]
         return DeterministicCityResult(None, list(problems[:12]), "validation_error", coverage)
+    apply_city_day_coverage(request, itinerary, coverage)
     coverage.update(program_day_numbers=[index + 1 for index in sorted(selected)],
                     selected_unique_visits=len(chosen),
                     selected_ids_by_day={str(index + 1): [visits[value].candidate.candidate_id for value in template.order]

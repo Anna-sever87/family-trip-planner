@@ -9,7 +9,7 @@ from test_city_deterministic import CENTER, candidates, request
 
 
 class SavedCityQualityTests(unittest.TestCase):
-    def test_filled_calendar_drops_old_partial_reasons_and_recounts_visits(self):
+    def test_filled_calendar_drops_stale_reasons_but_keeps_observable_light_days(self):
         req, pool = request(2, interest_categories=["museums"]), candidates(4)
         itinerary = build_deterministic_city_itinerary(req, pool, resolved_city=CENTER).itinerary
         prior = {"quality_status": "partial", "quality_reasons": ["incomplete_calendar", "search_limit"],
@@ -17,8 +17,12 @@ class SavedCityQualityTests(unittest.TestCase):
                  "discovery": {"map_requests": 12, "prompt": "synthetic-private-marker"}}
         before = deepcopy((req.model_dump(), pool, itinerary.model_dump(), prior))
         quality = evaluate_saved_city_quality(req, pool, itinerary, prior)
-        self.assertEqual(quality["quality_status"], "complete")
-        self.assertEqual(quality["quality_reasons"], [])
+        # Two 90-minute visits per day fill dates, not the requested 10-hour
+        # medium-paced day. Recompute current soft quality, not old failures.
+        self.assertEqual(quality["quality_status"], "partial")
+        self.assertEqual(quality["quality_reasons"], ["day_program_light", "day_window_unbalanced"])
+        self.assertEqual((quality["desired_program_minutes"], quality["light_program_days"],
+                          quality["unbalanced_program_days"]), (300, 2, 2))
         self.assertEqual(quality["selected_unique_visits"], 4)
         self.assertEqual(quality["interest_coverage"]["museums"]["selected_count"], 4)
         self.assertNotIn("states_explored", quality)
@@ -34,7 +38,9 @@ class SavedCityQualityTests(unittest.TestCase):
             "shopping_malls": {"status": "covered", "confirmed_count": 1, "selected_count": 1}}}
         quality = evaluate_saved_city_quality(req, pool, itinerary, prior)
         self.assertEqual(quality["quality_status"], "partial")
-        self.assertEqual(quality["quality_reasons"], ["requested_interest_missing"])
+        self.assertEqual(quality["quality_reasons"],
+                         ["requested_interest_missing", "day_program_light", "day_window_unbalanced"])
+        self.assertEqual((quality["light_program_days"], quality["unbalanced_program_days"]), (1, 1))
         self.assertEqual(quality["interest_coverage"]["shopping_malls"],
                          {"status": "not_scheduled", "confirmed_count": 1, "selected_count": 0})
 
@@ -44,7 +50,9 @@ class SavedCityQualityTests(unittest.TestCase):
         quality = evaluate_saved_city_quality(req, pool, itinerary, {
             "quality_reasons": ["budget_constraint", "indoor_evidence_missing", "search_limit"]})
         self.assertEqual(quality["quality_status"], "partial")
-        self.assertEqual(quality["quality_reasons"], ["incomplete_calendar"])
+        self.assertEqual(quality["quality_reasons"],
+                         ["incomplete_calendar", "day_program_light", "day_window_unbalanced"])
+        self.assertEqual((quality["light_program_days"], quality["unbalanced_program_days"]), (1, 1))
         self.assertEqual((quality["program_days"], quality["free_days"], quality["selected_unique_visits"]), (1, 6, 3))
 
     def test_unbound_route_cannot_supply_quality_claims(self):
