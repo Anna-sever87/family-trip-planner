@@ -25,6 +25,43 @@ UNKNOWN_WEATHER_NOTE = (
     "Отсутствие данных не означает отсутствие дождя; перед поездкой проверьте прогноз."
 )
 
+# Open-Meteo supplies GeoNames feature codes and optional population/admin2:
+# https://open-meteo.com/en/docs/geocoding-api
+# https://www.geonames.org/export/codes.html
+# These are display facts, never a ranking or authority to select a homonym.
+_CITY_FEATURE_LABELS = {
+    "PPL": "Населённый пункт",
+    "PPLA": "Административный центр региона",
+    "PPLA2": "Административный центр (уровень 2)",
+    "PPLA3": "Административный центр (уровень 3)",
+    "PPLA4": "Административный центр (уровень 4)",
+    "PPLA5": "Административный центр (уровень 5)",
+    "PPLC": "Столица страны",
+    "PPLCD": "Административный центр зависимой территории",
+    "PPLCH": "Историческая столица",
+    "PPLF": "Сельскохозяйственное поселение",
+    "PPLG": "Местонахождение правительства",
+    "PPLH": "Исторический населённый пункт",
+    "PPLL": "Населённая местность",
+    "PPLQ": "Заброшенный населённый пункт",
+    "PPLR": "Религиозное поселение",
+    "PPLS": "Группа населённых пунктов",
+    "PPLW": "Разрушенный населённый пункт",
+    "PPLX": "Часть населённого пункта",
+}
+_CITY_FEATURE_LABEL_VALUES = frozenset(_CITY_FEATURE_LABELS.values())
+
+
+def _safe_city_admin_detail(value) -> str:
+    if not isinstance(value, str) or not 1 <= len(value) <= 100 or not value.isprintable():
+        return ""
+    value = value.strip()
+    if not value or not any(char.isalnum() for char in value) or any(
+            not (unicodedata.category(char)[0] in "LMN" or char == " " or char in "-'’().,–—")
+            for char in value):
+        return ""
+    return value
+
 
 def safe_city_suggestions(value) -> tuple[str, ...]:
     """Small plain-text geographic labels, never arbitrary provider messages."""
@@ -50,12 +87,68 @@ def safe_city_suggestions(value) -> tuple[str, ...]:
     return tuple(result)
 
 
+def safe_city_suggestion_details(value, options) -> tuple[dict, ...]:
+    """Bounded display-only metadata bound to exact, already-safe option text.
+
+    No coordinates, provider IDs, arbitrary feature text or extra fields survive.
+    Missing/invalid optional facts are omitted, not inferred. Conflicting duplicate
+    labels are discarded rather than accepting whichever metadata arrived first.
+    """
+    options = safe_city_suggestions(options)
+    if not options or not isinstance(value, (list, tuple)):
+        return ()
+    candidates = {}
+    for detail in value[:MAX_CITY_RESULTS]:
+        if not isinstance(detail, dict):
+            continue
+        label = detail.get("label")
+        if not isinstance(label, str) or label not in options:
+            continue
+        feature = detail.get("feature_label")
+        feature = feature if isinstance(feature, str) and feature in _CITY_FEATURE_LABEL_VALUES else ""
+        population = detail.get("population")
+        # A finite display bound, not an estimate or a city-selection threshold.
+        population = population if type(population) is int and 1 <= population <= 100_000_000 else None
+        clean = {"label": label, "feature_label": feature,
+                 "admin2": _safe_city_admin_detail(detail.get("admin2")), "population": population}
+        candidates.setdefault(label, []).append(clean)
+    result = []
+    for label in options:
+        details = candidates.get(label, [])
+        if not details or any(item != details[0] for item in details[1:]):
+            continue
+        detail = details[0]
+        if detail["feature_label"] or detail["admin2"] or detail["population"] is not None:
+            result.append(detail)
+    return tuple(result)
+
+
+def _city_suggestion_lines(options, details) -> str:
+    by_label = {detail["label"]: detail for detail in details}
+    lines = []
+    for label in options:
+        lines.append(label)
+        detail = by_label.get(label, {})
+        facts = []
+        if detail.get("feature_label"):
+            facts.append(detail["feature_label"])
+        if detail.get("admin2"):
+            facts.append("Административная единица: " + detail["admin2"])
+        if detail.get("population") is not None:
+            population = format(detail["population"], ",").replace(",", " ")
+            facts.append("Население по справочнику: " + population)
+        if facts:
+            lines.append("  " + "; ".join(facts))
+    return "\n".join(lines)
+
+
 class CityResolutionError(ValueError):
     """A destination is not sufficiently unambiguous to anchor a city trip."""
 
-    def __init__(self, destination: str, *, reason: str, suggestions=()):
+    def __init__(self, destination: str, *, reason: str, suggestions=(), suggestion_details=()):
         self.reason = reason
         self.suggestions = safe_city_suggestions(suggestions) if reason == "ambiguous" else ()
+        self.suggestion_details = safe_city_suggestion_details(suggestion_details, self.suggestions)
         explanation = {
             "ambiguous": "Найдено несколько одноимённых населённых пунктов.",
             "not_found": "Указанный город не найден в географическом справочнике.",
@@ -66,7 +159,8 @@ class CityResolutionError(ValueError):
         super().__init__(
             explanation + " Уточните город, область/провинцию и страну; "
             "другой одноимённый город не подставляется."
-            + ("\nВарианты для уточнения:\n" + "\n".join(self.suggestions) if self.suggestions else "")
+            + ("\nВарианты для уточнения:\n" + _city_suggestion_lines(
+                self.suggestions, self.suggestion_details) if self.suggestions else "")
         )
 
 
@@ -176,9 +270,14 @@ def find_city(destination: str) -> Optional[Dict[str, Any]]:
                 label = suggestions[0]
                 # Same-admin homonyms cannot be resolved by this label alone.
                 identity = tuple(_context_identity(part) for part in label.split(","))
-                labels.setdefault(identity, []).append(label)
-        raise CityResolutionError(destination, reason="ambiguous", suggestions=[
-            values[0] for values in labels.values() if len(values) == 1
+                labels.setdefault(identity, []).append((label, found))
+        offered = [values[0] for values in labels.values() if len(values) == 1]
+        raise CityResolutionError(destination, reason="ambiguous",
+                                  suggestions=[label for label, _ in offered], suggestion_details=[
+            {"label": label, "feature_label": _CITY_FEATURE_LABELS.get(found.get("feature_code"), "")
+             if isinstance(found.get("feature_code"), str) else "",
+             "admin2": found.get("admin2"), "population": found.get("population")}
+            for label, found in offered
         ])
     if len(results) >= MAX_CITY_RESULTS:
         raise CityResolutionError(destination, reason="search_limit")

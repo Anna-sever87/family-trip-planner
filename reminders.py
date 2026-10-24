@@ -15,6 +15,8 @@ from datetime import date, datetime, time, timedelta
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from place_labels import build_place_labels, display_place_title
+
 
 HOUR_BEFORE = 10
 
@@ -1033,6 +1035,7 @@ def build_reminder_text(
         f"({day_date}): {theme}"
     ]
 
+    labels = build_place_labels({"request": request, "itinerary": itinerary})
     for item in _safe_list(
         day.get(
             "items"
@@ -1049,12 +1052,7 @@ def build_reminder_text(
             or ""
         ).strip()
 
-        title = str(
-            item_data.get(
-                "title"
-            )
-            or ""
-        ).strip()
+        title = display_place_title(item_data, labels).strip()
 
         if title:
             lines.append(

@@ -97,22 +97,48 @@ class CityCandidateTests(unittest.TestCase):
             address={"city": locality, "country": code, "country_code": code.lower()})])
         return self.run_pool(titles, days=days, center=center, destination=f"Test City, {code}")
 
-    def test_vn_tr_schema_and_prompt_require_local_names_with_explicit_fourteen_cap(self):
+    def test_vn_tr_native_names_share_general_long_trip_budgets(self):
         for code, language in (("VN", "vi,en"), ("TR", "tr,en")):
             with self.subTest(code=code):
                 self.foreign_pool([], code=code, days=14, provider_title="Test Museum")
                 call = self.completion.call_args
                 item_schema = call.kwargs["json_schema"]["properties"]["titles"]
-                self.assertEqual(item_schema["maxItems"], 14)
+                self.assertEqual(item_schema["maxItems"], 36)
                 self.assertEqual(item_schema["items"]["pattern"], candidates._NON_CYRILLIC_PATTERN)
                 system = call.args[0][0]["content"]
                 context = json.loads(call.args[0][1]["content"])
-                self.assertIn("не больше 14 названий", system)
+                self.assertIn("не больше 36 названий", system)
                 self.assertIn("не делай самодельную транслитерацию", system)
                 self.assertIn("не предполагай", system.casefold())
                 self.assertIn("пустой список", system)
-                self.assertEqual((context["max_titles"], context["map_languages"]), (14, language))
+                self.assertEqual((context["max_titles"], context["map_languages"]), (36, language))
+                self.assertEqual(context["usable_candidate_limit"], 24)
         self.get.assert_not_called()
+
+    def test_fourteen_day_vn_tr_can_confirm_twenty_four_native_places_with_one_ai_call(self):
+        for code, prefix in (("VN", "Bảo tàng Thử Nghiệm"), ("TR", "İlçe Şehir Müzesi")):
+            with self.subTest(country=code):
+                self.get.reset_mock()
+                self.completion.reset_mock()
+                titles = [f"{prefix} {number}" for number in range(36)]
+                def lookup(_url, **kwargs):
+                    title = kwargs["params"]["q"].split(",", 1)[0]
+                    return response([record(title=title, identifier=titles.index(title) + 1000,
+                        display_name=f"{title}, Test City, {code}",
+                        address={"city": "Test City", "country": code, "country_code": code.lower()})])
+                self.get.side_effect = lookup
+                result = self.run_pool(titles, days=14,
+                    center={**CENTER, "name": "Test City", "country_code": code}, destination=f"Test City, {code}",
+                    children_ages=[14], start_time="09:00", end_time="18:00", pace="средний")
+                self.assertEqual([item.title for item in result.candidates], titles[:24])
+                self.assertEqual(result.status, "success")
+                self.assertEqual((result.diagnostics["name_limit"], result.diagnostics["usable_limit"]), (36, 24))
+                self.assertEqual(result.diagnostics["attempted_names"], 24)
+                self.assertEqual(result.diagnostics["required_planning_minutes"], 3780)
+                self.assertEqual(result.diagnostics["pool_quality"], "limited")
+                self.assertEqual((result.map_requests, self.get.call_count), (24, 24))
+                self.assertEqual(result.usage["completion_calls"], 1)
+                self.completion.assert_called_once()
 
     def test_unicode_local_and_other_original_names_are_not_ascii_restricted(self):
         for code, title in (("VN", "Bảo tàng Thử Nghiệm"), ("VN", "Đường Ánh Sáng"),
@@ -160,17 +186,17 @@ class CityCandidateTests(unittest.TestCase):
                 self.assertNotIn("pattern", schema["items"])
                 self.assertEqual(self.get.call_args.kwargs["params"]["accept-language"], "ru")
 
-    def test_local_max_titles_rejects_excess_before_map_and_has_at_most_28_sends(self):
+    def test_local_names_reject_excess_before_map_and_share_36_send_limit(self):
         center = {**CENTER, "name": "Test City", "country_code": "VN"}
         self.get.side_effect = httpx.ConnectTimeout("offline")
-        result = self.run_pool([f"Test Museum {number}" for number in range(15)], days=7,
+        result = self.run_pool([f"Test Museum {number}" for number in range(37)], days=7,
                                center=center, destination="Test City, VN")
         self.assertTrue(result.problems)
         self.assertEqual(result.map_requests, 0)
         self.get.assert_not_called()
-        result = self.run_pool([f"Test Museum {number}" for number in range(14)], days=7,
+        result = self.run_pool([f"Test Museum {number}" for number in range(36)], days=7,
                                center=center, destination="Test City, VN")
-        self.assertEqual((result.map_requests, self.get.call_count, self.gate.call_count), (28, 28, 28))
+        self.assertEqual((result.map_requests, self.get.call_count, self.gate.call_count), (36, 36, 36))
 
     def test_single_leading_period_is_proposal_only_normalized_and_deduplicated(self):
         title = "Pagoda Testland"
@@ -289,7 +315,8 @@ class CityCandidateTests(unittest.TestCase):
         self.assertEqual(self.get.call_count, 1)  # No source-name bypass of the ordinary map check.
 
     def test_seed_plus_ai_raw_names_share_unchanged_http_cap(self):
-        for days, code, limit in ((1, "RU", 12), (7, "RU", 36), (7, "VN", 14), (7, "TR", 14)):
+        for days, code, limit in ((1, "RU", 12), (1, "VN", 12), (1, "TR", 12),
+                                  (7, "RU", 36), (7, "VN", 36), (7, "TR", 36)):
             with self.subTest(days=days, code=code):
                 self.get.reset_mock()
                 self.gate.reset_mock()

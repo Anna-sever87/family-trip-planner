@@ -578,8 +578,8 @@ def main() -> None:
             assert 'id="tripResultsStatus" class="visually-hidden" aria-live="polite"' in page.text
             assert page.text.count('aria-pressed="false"') >= 2
             assert 'aria-pressed="true"' in page.text
-            assert "/static/styles.css?v=20261024-london-quality" in page.text
-            assert "/static/app.js?v=20261024-london-quality" in page.text
+            assert "/static/styles.css?v=20261024-cover-framing" in page.text
+            assert "/static/app.js?v=20261024-cover-framing" in page.text
             assert 'class="hero travel-hero"' in page.text
             assert "ИИ-иллюстрация путешествия" in page.text
             assert page.text.count("/static/favicon.svg?v=20261022-premium-travel") == 3
@@ -897,7 +897,7 @@ def main() -> None:
             invalid_destination = dict(create_payload)
             invalid_destination["destination"] = "   "
             invalid_payloads.append(
-                (invalid_destination, "Название города должно содержать")
+                (invalid_destination, "Укажите город или территорию и страну")
             )
 
             invalid_date = dict(create_payload)

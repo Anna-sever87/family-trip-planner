@@ -51,6 +51,24 @@ _OCEAN_ROOMS_SOURCE = "https://baotanghdh.vn/khu-trung-bay-hdh/"
 _OCEAN_HOURS_SOURCE = "https://baotanghdh.vn/en/contact-us/"
 
 
+def _planning_duration(record: dict) -> int:
+    """Fixed product blocks, never inferred visit facts or a day-filling target."""
+    category, kind = record.get("category"), record.get("type")
+    if category == "tourism" and kind == "zoo":
+        # Reuse the already reviewed observed subtype/name classifier, without
+        # introducing broader name heuristics or any new provider/cache lookup.
+        # Lazy import avoids the discovery -> visit options dependency cycle.
+        from city_candidates import _specialized_animal_place
+        return 60 if _specialized_animal_place(record) else 120
+    if category == "tourism" and kind == "theme_park":
+        return 120
+    if category == "tourism" and kind == "aquarium":
+        return 90
+    shopping = category == "shop" and kind in {"mall", "shopping_centre"}
+    return (90 if kind in _LONG_PLANNING_TYPES or shopping else 30 if kind in _SHORT_PLANNING_TYPES
+            else 60 if kind in _MEDIUM_PLANNING_TYPES else 45)
+
+
 def _fold(value) -> str:
     return " ".join(unicodedata.normalize("NFKC", value).casefold().split()) if isinstance(value, str) else ""
 
@@ -216,8 +234,7 @@ def visit_option(candidate, request: TripRequest, *, visit_cards=()) -> CityVisi
             return _option_from_conditions(candidate, request, conditions)
         kind = candidate.record.get("type", "")
         shopping = candidate.record.get("category") == "shop" and kind in {"mall", "shopping_centre"}
-        duration = (90 if kind in _LONG_PLANNING_TYPES or shopping else 30 if kind in _SHORT_PLANNING_TYPES
-                    else 60 if kind in _MEDIUM_PLANNING_TYPES else 45)
+        duration = _planning_duration(candidate.record)
         basis, sources = "planning_estimate", ()
         published = lookup_city_visit_estimate(candidate)
         if published is not None and _fresh(published.checked_at, request):
@@ -234,6 +251,8 @@ def visit_option(candidate, request: TripRequest, *, visit_cards=()) -> CityVisi
                        + " Часы работы, стоимость и условия посещения уточните заранее.")
         if shopping:
             description += " Личные покупки не включены в расчёт стоимости маршрута."
+        if kind in {"theatre", "cinema"}:
+            description += " Спектакль или киносеанс в этот блок не включён: расписание не подтверждено."
         return CityVisitOption(candidate.candidate_id, duration, indoor, None, description, basis, unknown, sources)
     except (TypeError, ValueError, KeyError, AttributeError, OverflowError):
         return None

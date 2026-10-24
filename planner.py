@@ -87,6 +87,60 @@ from yandex_ai import (
 
 logger = logging.getLogger("planner")
 
+_REGION_GROUNDING_REASONS = frozenset({
+    "invalid_base_context", "duplicate_query", "http_budget_exhausted", "not_a_local_base",
+    "outside_region", "invalid_poi_context", "generic_place", "base_unconfirmed",
+    "source_identity_mismatch", "cached_mismatch", "cached_not_found",
+    "limited_search_incomplete", "map_unavailable", "base_address_unconfirmed",
+    "identity_mismatch", "query_budget_exhausted", "duplicate_place", "invalid_query",
+    "unrepresentable_map_context", "not_a_specific_poi", "outside_base_radius",
+    "incompatible_base_context",
+})
+_REGION_GROUNDING_PROBLEMS = {
+    "Не удалось получить список кандидатов; AI-запрос не повторялся.": "candidate_service_unavailable",
+    "Ответ кандидатов нарушил формат; карта не запрашивалась, AI-запрос не повторялся.": "invalid_candidate_batch",
+}
+
+
+def _regional_grounding_diagnostics(grounding, *, blocked_count=0) -> dict:
+    """Count finite server codes only; never expose queries, places or user text.
+
+    HTTP reservation is an upper bound, not a count of requests actually sent.
+    This diagnostic projection does not change the pool or any validation.
+    """
+    def count(value):
+        return min(value, 100_000) if type(value) is int and value >= 0 else 0
+
+    reasons, kinds, problems = {}, {}, {}
+    for rejection in grounding.rejected:
+        reason = rejection.get("reason") if isinstance(rejection, dict) else None
+        reason = reason if isinstance(reason, str) and reason in _REGION_GROUNDING_REASONS else "other"
+        kind = rejection.get("kind") if isinstance(rejection, dict) else None
+        kind = kind if isinstance(kind, str) and kind in {"base", "poi"} else "other"
+        reasons[reason] = reasons.get(reason, 0) + 1
+        kinds[kind] = kinds.get(kind, 0) + 1
+    for problem in grounding.problems:
+        code = _REGION_GROUNDING_PROBLEMS.get(problem, "other") if isinstance(problem, str) else "other"
+        problems[code] = problems.get(code, 0) + 1
+    return {
+        "base_count": len(grounding.base_facts), "poi_count": len(grounding.confirmed_hints),
+        "blocked_poi_count": count(blocked_count), "rejected_count": len(grounding.rejected),
+        "rejection_reasons": reasons, "rejection_kinds": kinds,
+        "problem_count": len(grounding.problems), "problem_codes": problems,
+        "incomplete": grounding.incomplete is True,
+        "completion_calls": count(grounding.completion_calls),
+        "verification_queries": count(grounding.verification_queries),
+        "geocode_calls": count(grounding.geocode_calls),
+        "cache_only_checks": count(grounding.cache_only_checks),
+        "cache_only_added": count(grounding.cache_only_added),
+        "source_roster_used": grounding.source_roster_used is True,
+        "source_clusters_omitted_count": len(grounding.source_clusters_omitted),
+        "reserved_http_attempts_upper_bound": count(grounding.reserved_http_attempts_upper_bound),
+        "http_attempt_limit": count(grounding.http_attempt_limit),
+        "query_limit": count(grounding.query_limit),
+    }
+
+
 MAX_ATTEMPTS = 3
 MAX_EDIT_ATTEMPTS = 4
 MAX_FORMAT_FAILURES = 2
@@ -5126,10 +5180,13 @@ def generate_itinerary(
         grounding = ground_region_candidates(request, region_scope, completion_fn=generate_json,
                                               known_hints=map_hints)
         grounding_calls = grounding.completion_calls
+        grounded_count = len(grounding.confirmed_hints)
         grounding.confirmed_hints = _without_blocked_place_hints(grounding.confirmed_hints, blocked_places)
         logger.info("Подбор мест: подтверждено %s баз и %s POI, отклонено %s; верхний резерв HTTP карты %s/%s",
                     len(grounding.base_facts), len(grounding.confirmed_hints), len(grounding.rejected),
                     grounding.reserved_http_attempts_upper_bound, grounding.http_attempt_limit)
+        logger.info("Региональный подбор: %s", json.dumps(_regional_grounding_diagnostics(
+            grounding, blocked_count=grounded_count - len(grounding.confirmed_hints)), sort_keys=True))
         if grounding.problems or not grounding.base_facts or not grounding.confirmed_hints:
             return PlanResult(
                 itinerary=Itinerary(title="Маршрут пока не составлен", summary="", days=[], tips=[]),

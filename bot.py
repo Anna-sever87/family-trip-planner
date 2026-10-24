@@ -1924,6 +1924,7 @@ def handle_trip(
         ),
         travel_cost=float(request.get("travel_cost", 0)),
         lodging_cost=float(request.get("lodging_cost", 0)),
+        saved_request=request,
     )
 
     send_parts(
@@ -3164,6 +3165,7 @@ def generation_job(
             children_ages=request.children_ages,
             travel_cost=request.travel_cost,
             lodging_cost=request.lodging_cost,
+            saved_request=request_dict,
         )
 
         send_parts(
@@ -3395,6 +3397,7 @@ def edit_generation_job(
             children_ages=request.children_ages,
             travel_cost=request.travel_cost,
             lodging_cost=request.lodging_cost,
+            saved_request=request_dict,
         )
 
         bot.send_message(

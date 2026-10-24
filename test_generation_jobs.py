@@ -337,6 +337,140 @@ class GenerationJobsTests(unittest.TestCase):
         self.worker.assert_called_once()
         self.claim.assert_not_called()
 
+    def test_actual_rich_city_preflight_survives_worker_persistence_and_restart_without_paid_work(self):
+        options = ("Пекин, Пекин, Китай", "Пекин, Шаньси, Китай")
+        details = [
+            {"label": options[0], "feature_label": "Столица страны", "admin2": "", "population": 20_000_000},
+            {"label": options[1], "feature_label": "Населённый пункт", "admin2": "Юньчэн", "population": 2_000},
+        ]  # Synthetic provider facts, not a current population claim.
+        self.worker.side_effect = REAL_CREATE_TRIP
+        with patch.object(web_service, "resolve_city_for_planning", side_effect=CityResolutionError(
+                "private-destination", reason="ambiguous", suggestions=options, suggestion_details=details)) as resolve, \
+                patch.object(web_service.vector_memory, "recall_family_memories",
+                             side_effect=AssertionError("No paid embedding before city clarification")) as recall, \
+                patch.object(web_service, "generate_itinerary",
+                             side_effect=AssertionError("No model before city clarification")) as model:
+            receipt = self.submit()
+            resolve.assert_not_called()
+            self.manager.executor.run_next()
+            status = jobs.get_job(1, self.account, job_id=receipt["job_id"])
+            self.assertEqual(status["clarification"], {
+                "kind": "city", "options": list(options), "details": details, "attempt_used": False})
+            self.assertEqual(status["status"], "failed")
+            row = self.rows("generation_jobs")[0]
+            self.assertEqual(json.loads(row["destination_options_json"]), {
+                "version": 1, "options": list(options), "details": details})
+            self.assertNotIn("private", json.dumps(row))
+            replacement = jobs.GenerationJobs(executor_factory=DeferredExecutor)
+            replacement.start()
+            self.addCleanup(replacement.close)
+            self.assertEqual(replacement.submit(1, self.account, self.key, self.request), status)
+            self.assertEqual(replacement.executor.calls, [])
+            self.assertEqual(jobs.get_job(1, self.account, key=self.key), status)
+            for owner, account in ((2, db.get_account_key(2)), (1, db.get_account_key(2))):
+                with self.subTest(owner=owner), self.assertRaises(jobs.JobNotFoundError):
+                    jobs.get_job(owner, account, job_id=receipt["job_id"])
+            resolve.assert_called_once_with(self.request.destination)
+            recall.assert_not_called()
+            model.assert_not_called()
+        self.worker.assert_called_once()
+        self.claim.assert_not_called()
+        self.assertEqual(self.rows("ai_requests"), [])
+        self.assertEqual(self.rows("access_route_attempts"), [])
+        self.assertEqual(self.rows("trips"), [])
+
+    def test_rich_city_details_cross_actual_legacy_http_and_receipt_get_without_resubmission(self):
+        options = ["City, Province, Country"]
+        details = [{"label": options[0], "feature_label": "Столица страны", "admin2": "Area", "population": 1234}]
+        self.worker.side_effect = web_service.TripCreateValidationError(
+            "private-raw-error", code="city_ambiguous", destination_options=options, destination_details=details)
+        receipt = self.submit()
+        self.manager.executor.run_next()
+        client = TestClient(web_app.app)  # No lifespan: only our disposable DB/worker is used.
+        self.addCleanup(client.close)
+        session, csrf, _ = web_auth.create_session(1)
+        client.cookies.set(web_auth.SESSION_COOKIE, session)
+        client.cookies.set(web_auth.CSRF_COOKIE, csrf)
+        expected = {"kind": "city", "options": options, "details": details, "attempt_used": False}
+        for path in (f"/api/generation-jobs/{receipt['job_id']}", f"/api/generation-jobs?key={self.key}"):
+            response = client.get(path)
+            self.assertEqual(response.status_code, 200, response.text)
+            self.assertEqual(response.json()["clarification"], expected)
+            self.assertNotIn("private", response.text)
+        self.worker.assert_called_once()
+        self.assertEqual(self.manager.executor.calls, [])
+        response = client.post("/api/trips", json=self.request.model_dump(), headers={"X-CSRF-Token": csrf})
+        self.assertEqual(response.status_code, 422, response.text)
+        self.assertEqual(response.json()["detail"]["clarification"], expected)
+        self.assertNotIn("private", response.text)
+        self.claim.assert_not_called()
+        self.assertEqual(self.rows("ai_requests"), [])
+
+    def test_clarification_versioned_object_is_revalidated_and_legacy_array_remains_readable(self):
+        options = ["City, Province, Country"]
+        details = [{"label": options[0], "feature_label": "Столица страны", "admin2": "Area", "population": 1234}]
+        self.worker.side_effect = web_service.TripCreateValidationError("ignored", code="city_ambiguous")
+        receipt = self.submit()
+        self.manager.executor.run_next()
+
+        def read_saved(saved):
+            with db.connect() as connection:
+                connection.execute("UPDATE generation_jobs SET destination_options_json=? WHERE job_id=?",
+                                   (json.dumps(saved, ensure_ascii=False), receipt["job_id"]))
+            return jobs.get_job(1, self.account, job_id=receipt["job_id"])["clarification"]
+
+        self.assertEqual(read_saved(options), {"kind": "city", "options": options, "attempt_used": False})
+        for saved in (
+                {"version": True, "options": options, "details": details},
+                {"version": "1", "options": options, "details": details},
+                {"version": 2, "options": options, "details": details},
+                {"version": 1, "options": options},
+                {"version": 1, "options": options, "details": details, "secret": "private"},
+                {"version": 1, "options": {"private": options}, "details": details},
+                {"version": 1, "options": [], "details": details}):
+            with self.subTest(saved=saved):
+                self.assertEqual(read_saved(saved), {"kind": "city", "options": [], "attempt_used": False})
+        for invalid in (None, {}, "private", [{"label": "Wrong, Province, Country", "population": 100}],
+                        [{"label": options[0], "feature_label": "<script>private</script>",
+                          "admin2": "private\u202eregion", "population": True}]):
+            with self.subTest(invalid=invalid):
+                self.assertEqual(read_saved({"version": 1, "options": options, "details": invalid}),
+                                 {"kind": "city", "options": options, "attempt_used": False})
+        raw = {"version": 1, "options": options, "details": [
+            {**details[0], "latitude": 1, "private": "secret", "provider_response": {"raw": "private"}}]}
+        self.assertEqual(read_saved(raw), {"kind": "city", "options": options, "details": details, "attempt_used": False})
+        self.worker.assert_called_once()
+        self.claim.assert_not_called()
+
+    def test_wrong_failure_code_or_empty_details_never_persists_or_exposes_rich_clarification(self):
+        options = ["City, Province, Country"]
+        details = [{"label": options[0], "feature_label": "Столица страны", "admin2": "Area", "population": 1234}]
+        for code in ("city_not_found", "city_unavailable", "validation_error", "private"):
+            with self.subTest(code=code):
+                key = str(uuid4())
+                self.worker.side_effect = web_service.TripCreateValidationError(
+                    "ignored", code=code, destination_options=options, destination_details=details)
+                receipt = self.submit(key=key)
+                self.manager.executor.run_next()
+                row = next(row for row in self.rows("generation_jobs") if row["job_id"] == receipt["job_id"])
+                self.assertEqual(json.loads(row["destination_options_json"]), [])
+                with db.connect() as connection:
+                    connection.execute("UPDATE generation_jobs SET destination_options_json=? WHERE job_id=?",
+                                       (json.dumps({"version": 1, "options": options, "details": details}), receipt["job_id"]))
+                exposed = jobs.get_job(1, self.account, job_id=receipt["job_id"])
+                if code in web_service.CITY_PREFLIGHT_CODES:
+                    self.assertEqual(exposed["clarification"], {"kind": "city", "options": [], "attempt_used": False})
+                else:
+                    self.assertNotIn("clarification", exposed)
+        self.worker.side_effect = web_service.TripCreateValidationError(
+            "ignored", code="city_ambiguous", destination_options=options, destination_details=[])
+        receipt = self.submit(key=str(uuid4()))
+        self.manager.executor.run_next()
+        row = next(row for row in self.rows("generation_jobs") if row["job_id"] == receipt["job_id"])
+        self.assertEqual(json.loads(row["destination_options_json"]), options)
+        self.assertNotIn("details", jobs.get_job(1, self.account, job_id=receipt["job_id"])["clarification"])
+        self.claim.assert_not_called()
+
     def test_clarification_revalidates_persisted_options_and_never_applies_to_other_failures(self):
         self.worker.side_effect = web_service.TripCreateValidationError("ignored", code="city_ambiguous")
         receipt = self.submit()

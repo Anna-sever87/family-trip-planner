@@ -32,6 +32,7 @@
 !yandex_art.py
 !trip_covers.py
 !trip_deletion.py
+!place_labels.py
 !db.py
 !destination_name_hints.py
 !destination_scope.py

@@ -31,7 +31,7 @@ RUNTIME_MODULES = (
     "schemas.py", "source_planning.py", "visit_facts.py", "verified_map_places.py", "web_app.py", "web_auth.py", "web_service.py", "weather.py",
     "yandex_ai.py", "city_visit_estimates.py", "city_rollout.py", "city_context.py", "city_edit.py", "city_edit_service.py",
     "city_deterministic.py", "city_visit_options.py", "city_preferences.py", "city_evidence.py", "generation_jobs.py", "generation_quality.py", "cover_prompts.py", "cover_subjects.py",
-    "yandex_art.py", "trip_covers.py", "trip_deletion.py",
+    "yandex_art.py", "trip_covers.py", "trip_deletion.py", "place_labels.py",
 )
 SUPPORT_FILES = (
     ".dockerignore", ".env.example", ".gitignore", "Dockerfile", "compose.yaml",

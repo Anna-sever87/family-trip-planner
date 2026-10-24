@@ -18,6 +18,7 @@ from schemas import Itinerary, ItineraryDay
 from verified_map_places import is_public_map_point, item_map_attribution
 from program_coverage import FREE_DAY_NOTE, program_report_text
 from city_estimates import UNPRICED_VISIT_LABEL, budget_coverage, city_unpriced_visit_note, is_unpriced_city_visit
+from place_labels import build_place_labels, display_place_title
 
 _WINDIR = os.environ.get("WINDIR", "C:\\Windows")
 # Пары (обычный, жирный). Первый найденный вариант используется. Свой шрифт можно положить в папку fonts.
@@ -30,6 +31,14 @@ FONT_CANDIDATES = [
     ("/Library/Fonts/Arial.ttf", "/Library/Fonts/Arial Bold.ttf"),
 ]
 _fonts: Optional[Tuple[str, str]] = None
+_cjk_font: Optional[str] = None
+# The Linux image installs the redistributable WenQuanYi font. Windows keeps
+# its system fonts local: no Microsoft font is copied into the application.
+CJK_FONT_CANDIDATES = (
+    "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
+    os.path.join(_WINDIR, "Fonts", "msyh.ttc"),
+    os.path.join(_WINDIR, "Fonts", "simsun.ttc"),
+)
 
 
 def _register_fonts() -> Tuple[str, str]:
@@ -45,7 +54,7 @@ def _register_fonts() -> Tuple[str, str]:
     raise RuntimeError("Не найден шрифт с русскими буквами. Положите DejaVuSans.ttf и DejaVuSans-Bold.ttf в папку fonts.")
 
 
-EMOJI_RE = re.compile("[\U00010000-\U0010FFFF\u2190-\u2BFF\uFE00-\uFE0F\u200d]")
+EMOJI_RE = re.compile("[\U0001F000-\U0001FAFF\u2190-\u2BFF\uFE00-\uFE0F\u200d]")
 
 
 def _clean(text: str) -> str:
@@ -57,8 +66,58 @@ def _esc(text: str) -> str:
     return escape(_clean(text))
 
 
+def _is_cjk(char: str) -> bool:
+    code = ord(char)
+    return (0x2E80 <= code <= 0xA4CF or 0xAC00 <= code <= 0xD7AF
+            or 0xF900 <= code <= 0xFAFF or 0xFF00 <= code <= 0xFFEF
+            or 0x20000 <= code <= 0x323AF)
+
+
+def _embedded_cjk_font() -> str:
+    global _cjk_font
+    if _cjk_font is not None:
+        return _cjk_font
+    for path in CJK_FONT_CANDIDATES:
+        if os.path.isfile(path):
+            # All candidates have TrueType outlines; ReportLab embeds only
+            # the glyph subset used by this document, not a reader-side CID.
+            pdfmetrics.registerFont(TTFont("TripCJK", path, subfontIndex=0))
+            _cjk_font = "TripCJK"
+            return _cjk_font
+    raise RuntimeError("Для китайских названий в PDF требуется шрифт WenQuanYi Zen Hei (fonts-wqy-zenhei).")
+
+
+def _text_markup(text: str) -> str:
+    """Escape plain text and switch only missing CJK glyphs to an embedded font.
+
+    Keep URI escaping separate: generated font markup must never enter an
+    attribute. This projection neither changes a place name nor transliterates
+    unsupported characters into a different map identity.
+    """
+    text = _clean(text)
+    regular, _ = _register_fonts()
+    original_glyphs = pdfmetrics.getFont(regular).face.charToGlyph
+    chunks, current, previous_font = [], [], None
+    for char in text:
+        font = None
+        if _is_cjk(char) and not original_glyphs.get(ord(char)):
+            font = _embedded_cjk_font()
+            if not pdfmetrics.getFont(font).face.charToGlyph.get(ord(char)):
+                raise RuntimeError("Шрифт PDF не поддерживает один из символов исходного названия. Название не изменялось.")
+        if font != previous_font and current:
+            content = escape("".join(current))
+            chunks.append(f'<font name="{previous_font}">{content}</font>' if previous_font else content)
+            current = []
+        current.append(char)
+        previous_font = font
+    if current:
+        content = escape("".join(current))
+        chunks.append(f'<font name="{previous_font}">{content}</font>' if previous_font else content)
+    return "".join(chunks)
+
+
 def _p(text: str, style: ParagraphStyle) -> Paragraph:
-    return Paragraph(_esc(text).replace("\n", "<br/>"), style)
+    return Paragraph(_text_markup(text).replace("\n", "<br/>"), style)
 
 
 def _amount(value: Any) -> float:
@@ -85,12 +144,13 @@ def _budget_values(request: Dict[str, Any], itinerary: Itinerary) -> Dict[str, f
             "program_budget": budget - travel - lodging, "total": total, "remaining": budget - total}
 
 
-def _verified_route_points(day: ItineraryDay) -> List[Dict[str, Any]]:
+def _verified_route_points(day: ItineraryDay, labels: Optional[Dict[str, str]] = None) -> List[Dict[str, Any]]:
     points = []
     for item in day.items:
         if not is_public_map_point(item):
             continue
         points.append({"number": len(points) + 1, "title": item.title, "time": item.time,
+                       "display_title": display_place_title(item, labels),
                        "lat": item.lat, "lon": item.lon, **item_map_attribution(item)})
     return points
 
@@ -162,10 +222,11 @@ class _RouteScheme(Flowable):
         canvas.restoreState()
 
 
-def _day_route(day: ItineraryDay, small: ParagraphStyle, bold: str, width: float) -> List[Any]:
+def _day_route(day: ItineraryDay, small: ParagraphStyle, bold: str, width: float,
+               labels: Optional[Dict[str, str]] = None) -> List[Any]:
     if day.day_mode == "free":
         return [_p("Свободный день: посещения не запланированы, точки на карте не требуются.", small)]
-    points = _verified_route_points(day)
+    points = _verified_route_points(day, labels)
     attractions = sum(item.kind == "attraction" for item in day.items)
     if not points:
         return [_p("Схема маршрута: нет подтверждённых координат. Проверьте места перед поездкой.", small)]
@@ -176,7 +237,7 @@ def _day_route(day: ItineraryDay, small: ParagraphStyle, bold: str, width: float
         source = (f'<br/><a href="{_esc(url)}" color="#286279">{label}</a>' if url else
                   '<br/>Источник координат требует перепроверки.')
         legend.append(Paragraph(
-            f'<font name="{bold}">{point["number"]}. {_esc(point["time"])} - {_esc(point["title"])}</font>'
+            f'<font name="{bold}">{point["number"]}. {_esc(point["time"])} - {_text_markup(point["display_title"])}</font>'
             + source, small))
         legend.append(Spacer(1, 5))
     table = Table([[_RouteScheme(points, bold, width * 0.43), legend]], colWidths=[width * 0.45, width * 0.55])
@@ -196,6 +257,7 @@ def build_trip_pdf(trip: Dict[str, Any], checklist: List[Dict[str, Any]]) -> byt
     regular, bold = _register_fonts()
     request = trip.get("request", {})
     itinerary = Itinerary.model_validate(trip["itinerary"])
+    labels = build_place_labels(trip)
     currency = request.get("currency", "EUR")
     costs = _budget_values(request, itinerary)
     unpriced_note = city_unpriced_visit_note(itinerary)
@@ -273,12 +335,12 @@ def build_trip_pdf(trip: Dict[str, Any], checklist: List[Dict[str, Any]]) -> byt
             story.append(Spacer(1, 6))
         rows = []
         for item in day.items:
-            display_area = _esc(item.area)
-            lines = [f"<b>{_esc(item.title)}</b>" + (f" ({display_area})" if display_area else "")]
+            display_area = _text_markup(item.area)
+            lines = [f"<b>{_text_markup(display_place_title(item, labels))}</b>" + (f" ({display_area})" if display_area else "")]
             if item.description:
-                lines.append(_esc(item.description))
+                lines.append(_text_markup(item.description))
             if item.kids_note and children_ages:
-                lines.append(f"<i>Для детей: {_esc(item.kids_note)}</i>")
+                lines.append(f"<i>Для детей: {_text_markup(item.kids_note)}</i>")
             if item.kind == "attraction" and not is_public_map_point(item):
                 lines.append("<i>(место не подтверждено на карте, проверьте перед поездкой)</i>")
             cost = f"~{item.cost:g} {currency}" if item.cost else ""
@@ -295,7 +357,7 @@ def build_trip_pdf(trip: Dict[str, Any], checklist: List[Dict[str, Any]]) -> byt
             story.append(table)
         if day.rainy_alternative:
             story += [Spacer(1, 3), _p(f"Если дождь: {day.rainy_alternative}", small)]
-        story += [Spacer(1, 8), *_day_route(day, small, bold, doc.width)]
+        story += [Spacer(1, 8), *_day_route(day, small, bold, doc.width, labels)]
 
     closing_section = []
     if itinerary.tips:

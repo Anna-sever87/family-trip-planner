@@ -13,6 +13,7 @@ import os
 from pathlib import Path
 import re
 import threading
+import unicodedata
 from uuid import uuid4
 
 import db
@@ -40,6 +41,27 @@ MESSAGES = {
 }
 _FILE_NAME = re.compile(r"[0-9a-f]{32}\.(?:jpg|png)\Z")
 _REVIEW_LABEL = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}\Z")
+_IMAGE_DIGEST = re.compile(r"[0-9a-f]{64}\Z")
+
+
+def _safe_caption(label, location):
+    """Only bounded public labels; no request/prompt strings or markup."""
+    for value, maximum in ((label, 120), (location, 240)):
+        if (not isinstance(value, str) or not value or len(value) > maximum
+                or value != value.strip()
+                or not any(unicodedata.category(char).startswith("L") for char in value)
+                or any(not (unicodedata.category(char)[0] in "LMN"
+                            or char in " .,'’()-\"«»–—") for char in value)):
+            return "", ""
+    return label, location
+
+
+def _prompt_caption(prompt):
+    label, location = getattr(prompt, "subject_label", ""), getattr(prompt, "subject_location", "")
+    checked = _safe_caption(label, location)
+    if (label or location) and checked == ("", ""):
+        raise CoverDestinationError("Некорректная подпись иллюстрации.")
+    return checked
 
 
 class CoverNotFoundError(LookupError):
@@ -94,11 +116,20 @@ def init_schema():
             failure_code TEXT NOT NULL DEFAULT '',
             created_at TEXT NOT NULL,
             finished_at TEXT NOT NULL DEFAULT '',
+            subject_label TEXT NOT NULL DEFAULT '',
+            subject_location TEXT NOT NULL DEFAULT '',
+            subject_image_sha256 TEXT NOT NULL DEFAULT '',
             FOREIGN KEY(trip_id) REFERENCES trips(id) ON DELETE CASCADE,
             FOREIGN KEY(account_key) REFERENCES users(account_key) ON DELETE CASCADE
         )""")
         if "hidden" not in {row["name"] for row in conn.execute("PRAGMA table_info(trip_covers)")}:
             conn.execute("ALTER TABLE trip_covers ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0 CHECK(hidden IN (0,1))")
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(trip_covers)")}
+        # No backfill: today's subject selection is not evidence about an old
+        # image. The existing immutable receipt, bytes and quota stay untouched.
+        for name in ("subject_label", "subject_location", "subject_image_sha256"):
+            if name not in columns:
+                conn.execute(f"ALTER TABLE trip_covers ADD COLUMN {name} TEXT NOT NULL DEFAULT ''")
         conn.execute("""CREATE TABLE IF NOT EXISTS trip_cover_overrides (
             trip_id INTEGER PRIMARY KEY,
             account_key TEXT NOT NULL,
@@ -228,12 +259,32 @@ class TripCovers:
     def _status(self, row=None):
         state = row["status"] if row else ("empty" if enabled() else "disabled")
         hidden = bool(row["hidden"]) if row is not None else False
+        label, location = "", ""
         if state == "ready":
-            if not self._display_image_available(row):
+            try:
+                validated, displayed = self._read_display_image_record(row)
+                if not hidden:
+                    label, location = self._display_caption(displayed, validated)
+            except CoverNotFoundError:
                 state = "failed"
         return {"status": state, "message": MESSAGES["hidden" if state == "ready" and hidden else state], "disclosure": COVER_DISCLOSURE,
                 "available": enabled(), "hidden": hidden,
+                "subject_label": label, "subject_location": location,
                 "image_url": f'/api/trips/{row["trip_id"]}/cover/image' if state == "ready" and not hidden else None}
+
+    @staticmethod
+    def _display_caption(displayed, validated):
+        # Overrides are different images. Never apply the original receipt's
+        # caption to an override, or recompute an old caption from today's trip.
+        if ("source_receipt" in displayed.keys()
+                or any(key not in displayed.keys() for key in
+                       ("subject_label", "subject_location", "subject_image_sha256"))):
+            return "", ""
+        digest = displayed["subject_image_sha256"]
+        if (not isinstance(digest, str) or not _IMAGE_DIGEST.fullmatch(digest)
+                or hashlib.sha256(validated.data).hexdigest() != digest):
+            return "", ""
+        return _safe_caption(displayed["subject_label"], displayed["subject_location"])
 
     def _display_candidates(self, row):
         with db.connect() as conn:
@@ -252,6 +303,9 @@ class TripCovers:
         return True
 
     def _read_display_image(self, row):
+        return self._read_display_image_record(row)[0]
+
+    def _read_display_image_record(self, row):
         # Missing/corrupt reviewed files fail closed without altering originals.
         for candidate in self._display_candidates(row):
             try:
@@ -261,7 +315,7 @@ class TripCovers:
                     continue
                 validated = yandex_art.validate_image(content)
                 if validated.mime_type == candidate["mime_type"]:
-                    return validated
+                    return validated, candidate
             except (CoverNotFoundError, OSError, yandex_art.YandexArtError):
                 continue
         raise CoverNotFoundError("Иллюстрация недоступна.")
@@ -410,6 +464,7 @@ class TripCovers:
                     prompt = _prompt_for(trip)
                     if not prompt.generation_allowed:
                         return self._no_subject_status()
+                    label, location = _prompt_caption(prompt)
                     if self.executor is None or self.closing:
                         raise CoverBusyError(MESSAGES["busy"])
                     digest = hashlib.sha256((prompt.cache_key + "\n" + yandex_art.configured_model_uri()).encode()).hexdigest()
@@ -425,8 +480,10 @@ class TripCovers:
                         raise CoverBusyError(MESSAGES["busy"])
                     # Reserve before dispatch; even uncertain POSTs consume one attempt.
                     conn.execute("INSERT INTO cover_attempts(attempt_id,utc_day) VALUES (?,?)", (uuid4().hex, today))
-                    conn.execute("INSERT INTO trip_covers(trip_id,account_key,cache_key,status,created_at) "
-                                 "VALUES (?,?,?,'queued',?)", (trip_id, account_key, digest, db._now()))
+                    conn.execute("INSERT INTO trip_covers "
+                                 "(trip_id,account_key,cache_key,status,created_at,subject_label,subject_location) "
+                                 "VALUES (?,?,?,'queued',?,?,?)",
+                                 (trip_id, account_key, digest, db._now(), label, location))
             except BaseException:
                 if acquired:
                     self.slots.release()
@@ -461,9 +518,10 @@ class TripCovers:
                 conn.execute("BEGIN IMMEDIATE")
                 _owned_trip(conn, tg_id, account_key, trip_id)
                 os.replace(temporary, target)
-                changed = conn.execute("UPDATE trip_covers SET status='ready',file_name=?,mime_type=?,finished_at=? "
+                changed = conn.execute("UPDATE trip_covers SET status='ready',file_name=?,mime_type=?,finished_at=?,subject_image_sha256=? "
                                        "WHERE trip_id=? AND account_key=? AND status='running'",
-                                       (name, validated.mime_type, db._now(), trip_id, account_key)).rowcount
+                                       (name, validated.mime_type, db._now(), hashlib.sha256(validated.data).hexdigest(),
+                                        trip_id, account_key)).rowcount
                 if changed != 1:
                     raise CoverNotFoundError("Иллюстрация недоступна.")
             committed = True
@@ -477,6 +535,12 @@ class TripCovers:
             with db.connect() as conn:
                 conn.execute("BEGIN IMMEDIATE")
                 _owned_trip(conn, tg_id, account_key, trip_id)
+                claimed = conn.execute("SELECT * FROM trip_covers WHERE trip_id=? AND account_key=?",
+                                       (trip_id, account_key)).fetchone()
+                expected_key = hashlib.sha256((prompt.cache_key + "\n" + yandex_art.configured_model_uri()).encode()).hexdigest()
+                if (claimed is None or claimed["cache_key"] != expected_key
+                        or (claimed["subject_label"], claimed["subject_location"]) != _prompt_caption(prompt)):
+                    raise CoverStateError("Заявка иллюстрации изменилась.")
                 changed = conn.execute("UPDATE trip_covers SET status='running' "
                                        "WHERE trip_id=? AND account_key=? AND status='queued'",
                                        (trip_id, account_key)).rowcount

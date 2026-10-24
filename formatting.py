@@ -5,6 +5,7 @@ from schemas import Itinerary
 from verified_map_places import is_public_map_point
 from program_coverage import FREE_DAY_NOTE, program_report_text
 from city_estimates import UNPRICED_VISIT_LABEL, city_unpriced_visit_note, is_unpriced_city_visit
+from place_labels import build_place_labels, display_place_title
 
 KIND_ICONS = {"attraction": "🏛", "meal": "🍽", "rest": "😴"}
 
@@ -17,8 +18,12 @@ def format_itinerary(
     children_ages: Optional[List[int]] = None,
     travel_cost: float = 0,
     lodging_cost: float = 0,
+    saved_request: Optional[dict] = None,
 ) -> str:
     """Собирает читаемый текст маршрута без разметки (чтобы Telegram не ругался на спецсимволы)."""
+    # The display helper also accepts legacy attribute-based itinerary objects;
+    # serialization is not needed to render their original titles safely.
+    labels = build_place_labels({"request": saved_request or {}, "itinerary": itinerary})
     lines: List[str] = [f"✈️ {itinerary.title}", "", itinerary.summary]
     coverage = program_report_text(itinerary)
     if coverage:
@@ -62,7 +67,7 @@ def format_itinerary(
             if is_unpriced_city_visit(itinerary, item):
                 cost = f", {UNPRICED_VISIT_LABEL}"
             place = f" ({item.area})" if item.area else ""
-            lines.append(f"{item.time} {icon} {item.title}{place}{cost}")
+            lines.append(f"{item.time} {icon} {display_place_title(item, labels)}{place}{cost}")
             if item.description:
                 lines.append(f"   {item.description}")
             if item.kids_note and (children_ages is None or children_ages):

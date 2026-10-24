@@ -23,7 +23,7 @@ import web_service
 from generation_quality import KEY as QUALITY_KEY, safe_coverage
 from schemas import TripRequest
 from yandex_ai import YandexAIError
-from weather import safe_city_suggestions
+from weather import safe_city_suggestions, safe_city_suggestion_details
 
 
 MAX_WORKERS = 2
@@ -113,15 +113,22 @@ def public_status(row, conn=None):
             "trip_id": row["trip_id"] if state == "succeeded" else None,
             "message": message}
     if state == "failed" and code in web_service.CITY_PREFLIGHT_CODES:
-        options = ()
+        options, details = (), ()
         if code == "city_ambiguous":
             raw = row["destination_options_json"] if "destination_options_json" in row.keys() else "[]"
             if isinstance(raw, str) and len(raw) <= 4096:
                 try:
-                    options = safe_city_suggestions(json.loads(raw))
+                    saved = json.loads(raw)
+                    if isinstance(saved, dict) and set(saved) == {"version", "options", "details"} and type(saved["version"]) is int and saved["version"] == 1:
+                        options = safe_city_suggestions(saved["options"])
+                        details = safe_city_suggestion_details(saved["details"], options)
+                    else:
+                        options = safe_city_suggestions(saved)
                 except (ValueError, TypeError):
                     pass
         payload["clarification"] = {"kind": "city", "options": list(options), "attempt_used": False}
+        if details:
+            payload["clarification"]["details"] = list(details)
     return payload
 
 
@@ -221,13 +228,15 @@ class GenerationJobs:
         return get_job(tg_id, account_key, job_id=job_id)
 
     @staticmethod
-    def _finish(job_id, state, code, destination_options=()):
+    def _finish(job_id, state, code, destination_options=(), destination_details=()):
         options = safe_city_suggestions(destination_options) if state == "failed" and code == "city_ambiguous" else ()
+        details = safe_city_suggestion_details(destination_details, options)
+        saved = {"version": 1, "options": options, "details": details} if details else options
         with db.connect() as conn:
             # Atomic successful save wins over a later rendering/memory error.
             conn.execute("UPDATE generation_jobs SET status=?, failure_code=?, finished_at=?, destination_options_json=? "
                          "WHERE job_id=? AND status IN ('queued','running')",
-                         (state, code, db._now(), json.dumps(options, ensure_ascii=False), job_id))
+                         (state, code, db._now(), json.dumps(saved, ensure_ascii=False), job_id))
 
     def _run(self, job_id, tg_id, account_key, request, access_grant=None):
         try:
@@ -251,7 +260,7 @@ class GenerationJobs:
                 self._finish(job_id, "failed", code if code in {
                     "insufficient_data", "search_limit", "invalid_request", "validation_error", "unsupported_preferences",
                     *web_service.CITY_PREFLIGHT_CODES,
-                } else "validation", getattr(error, "destination_options", ()))
+                } else "validation", getattr(error, "destination_options", ()), getattr(error, "destination_details", ()))
             except web_service.AIDailyLimitError:
                 self._finish(job_id, "failed", "limit")
             except web_service.EditBusyError:

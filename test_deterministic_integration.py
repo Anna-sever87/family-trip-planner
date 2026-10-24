@@ -159,7 +159,7 @@ class DeterministicIntegrationTests(unittest.TestCase):
         initial = json.loads(completion.call_args_list[1].args[0][1]["content"])
         review = json.loads(completion.call_args_list[2].args[0][1]["content"])
         self.assertEqual(initial["planning_depth"]["required_planning_minutes"], 1890)
-        self.assertEqual(review["depth_review"]["selected_planning_minutes"], 360)
+        self.assertEqual(review["depth_review"]["selected_planning_minutes"], 90 + 45 + 120 + 90 + 90)
         self.assertEqual(review["depth_review"]["selected_candidate_ids"], first)
         self.assertEqual(set(completion.call_args.kwargs["json_schema"]["properties"]), {"status", "candidate_ids"})
 
@@ -358,7 +358,9 @@ class DeterministicIntegrationTests(unittest.TestCase):
                 "status": "selected", "candidate_ids": [pool[0].candidate_id]}))
         self.assertFalse(result.problems)
         self.assertEqual(result.generation_coverage["quality_status"], "partial")
-        self.assertIn("day_program_light", result.generation_coverage["quality_reasons"])
+        self.assertEqual(result.generation_coverage["quality_reasons"], ["day_window_unbalanced"])
+        self.assertEqual([item.duration_min for day in result.itinerary.days for item in day.items
+                          if item.place_query == pool[1].place_query], [120])
         self.assertEqual(result.generation_coverage["selected_unique_visits"], 4)
         self.assertTrue(all(item["status"] == "covered"
                             for item in result.generation_coverage["interest_coverage"].values()))
@@ -384,7 +386,9 @@ class DeterministicIntegrationTests(unittest.TestCase):
                 "status": "selected", "candidate_ids": selected}))
         self.assertFalse(result.problems)
         self.assertEqual(result.generation_coverage["quality_status"], "partial")
-        self.assertIn("day_program_light", result.generation_coverage["quality_reasons"])
+        self.assertEqual(result.generation_coverage["quality_reasons"], ["day_window_unbalanced"])
+        self.assertEqual([item.duration_min for day in result.itinerary.days for item in day.items
+                          if item.place_query == pool[2].place_query], [120])
         self.assertEqual(result.generation_coverage["interest_coverage"]["zoos"],
                          {"status": "covered", "confirmed_count": 4, "selected_count": 1})
         self.assertEqual({item.place_query for day in result.itinerary.days for item in day.items
@@ -432,8 +436,11 @@ class DeterministicIntegrationTests(unittest.TestCase):
         report = result.generation_coverage
         self.assertEqual((report["selection_mode"], report["selection_calls"]), ("structured_preferences", 0))
         self.assertEqual(report["preference_candidates"], 24)
-        self.assertEqual((report["quality_status"], report["program_days"]), ("partial", 7))
-        self.assertIn("day_program_light", report["quality_reasons"])
+        self.assertEqual((report["quality_status"], report["program_days"]), ("complete", 7))
+        self.assertEqual(report["quality_reasons"], [])
+        zoo_queries = {item.place_query for item in pool if item.record["type"] == "zoo"}
+        self.assertEqual({item.duration_min for day in result.itinerary.days for item in day.items
+                          if item.place_query in zoo_queries}, {120})
         self.assertLessEqual(report["states_explored"], 20000)
         self.assertFalse(report["selection_repair_attempted"])
         completion.assert_called_once()  # Discovery only.
@@ -447,8 +454,11 @@ class DeterministicIntegrationTests(unittest.TestCase):
         report = result.generation_coverage
         self.assertEqual((report["selection_mode"], report["memory_ranking_status"]), ("memory_ranking", "applied"))
         self.assertEqual((report["selection_calls"], report["preference_candidates"]), (1, 24))
-        self.assertEqual((report["quality_status"], report["program_days"]), ("partial", 7))
-        self.assertIn("day_program_light", report["quality_reasons"])
+        self.assertEqual((report["quality_status"], report["program_days"]), ("complete", 7))
+        self.assertEqual(report["quality_reasons"], [])
+        zoo_queries = {item.place_query for item in pool if item.record["type"] == "zoo"}
+        self.assertEqual({item.duration_min for day in result.itinerary.days for item in day.items
+                          if item.place_query in zoo_queries}, {120})
         self.assertFalse(report["selection_depth_shortfall"])
         self.assertFalse(report["selection_repair_attempted"])
         self.assertEqual(completion.call_count, 2)  # One discovery + one ranking; no depth review.

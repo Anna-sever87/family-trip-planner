@@ -36,15 +36,15 @@ const $ = (id) => document.getElementById(id);
 
 const DESTINATION_KIND_COPY = Object.freeze({
   city: {
-    label: "Город и страна",
-    placeholder: "Например: Казань, Россия",
-    hint: "Укажите город и страну. Для одноимённых городов добавьте регион: Москва, Москва, Россия. Для городов-государств: Сингапур, Сингапур или Ватикан, Ватикан. Маршрут планируется в городском радиусе.",
+    label: "Город",
+    placeholder: "Например: Казань",
+    hint: "Страну укажите в отдельном обязательном поле. Если найдутся одноимённые города, выберите подходящий регион из предложенного списка. Маршрут планируется в городском радиусе.",
     goal: "Познакомиться с городом",
     goalPlaceholder: "Например: познакомиться с городом и отдохнуть",
   },
   region: {
     label: "Регион, озеро или территория",
-    placeholder: "Например: Байкал, Россия",
+    placeholder: "Например: Карелия",
     hint: "Для озёр и водных территорий используется сам контур и ближайшая береговая зона до 5 км; для остальных регионов — допуск до 40 км. Это технический допуск, не официальная граница. Маршрут может включать несколько зон выбранной территории. Базы дней и переезды ориентировочные: время, сезонную доступность и стоимость нужно проверить отдельно — маршрут не подтверждает бронирование.",
     goal: "Познакомиться с территорией",
     goalPlaceholder: "Например: увидеть природу Байкала и отдохнуть",
@@ -83,19 +83,32 @@ function savedCoverAsset(trip, status) {
   const id = Number(trip.id);
   if (!Number.isSafeInteger(id) || id <= 0 || status?.status !== "ready" || status.hidden === true
       || status.image_url !== `/api/trips/${id}/cover/image`) return null;
-  return { src: status.image_url, alt: `ИИ-иллюстрация направления ${trip.destination}; не фотография`,
-    caption: "ИИ-иллюстрация · не фотография" };
+  // Only immutable generation metadata may identify an existing illustration.
+  // Never derive its subject from today's (possibly edited) itinerary.
+  const label = typeof status.subject_label === "string" && status.subject_label.length <= 160
+    ? status.subject_label.trim() : "";
+  const location = label && typeof status.subject_location === "string" && status.subject_location.length <= 240
+    ? status.subject_location.trim() : "";
+  return { src: status.image_url,
+    alt: label ? `ИИ-иллюстрация: ${label}${location ? ` (${location})` : ""}; не фотография`
+      : "ИИ-иллюстрация поездки; не фотография",
+    subjectLabel: label, subjectLocation: location, caption: "ИИ-иллюстрация · не фотография" };
 }
 
 function createTripCover(trip, detail = false, savedStatus = null) {
   const cover = node("div", detail ? "trip-detail-cover" : "trip-card-cover");
   const asset = savedCoverAsset(trip, savedStatus) || destinationCover(trip);
+  const frame = node("div", "trip-cover-frame");
   const placeholder = node("div", "trip-cover-placeholder");
   placeholder.setAttribute("aria-hidden", "true");
   placeholder.append(node("span", "atlas-symbol", "⌖"), node("span", "atlas-route", "● · · · · · ✦"));
-  const caption = node("span", "cover-caption", asset?.caption || "Иллюстрация путешествия");
+  const caption = node("p", "cover-caption");
+  if (asset?.subjectLabel) {
+    caption.append(node("span", "cover-subject", `На иллюстрации: ${asset.subjectLabel}${asset.subjectLocation ? ` · ${asset.subjectLocation}` : ""}`));
+  }
+  caption.append(node("span", "cover-disclosure", asset?.caption || "Иллюстрация путешествия"));
   placeholder.hidden = Boolean(asset);
-  cover.append(placeholder);
+  frame.append(placeholder);
   if (asset) {
     const photo = node("img", "trip-cover-image");
     photo.src = asset.src;
@@ -108,11 +121,11 @@ function createTripCover(trip, detail = false, savedStatus = null) {
       photo.hidden = true;
       placeholder.hidden = false;
       cover.classList.add("cover-is-generic");
-      caption.textContent = "Иллюстрация путешествия";
+      caption.replaceChildren(node("span", "cover-disclosure", "Иллюстрация путешествия"));
     }, { once: true });
-    cover.append(photo);
+    frame.append(photo);
   } else cover.classList.add("cover-is-generic");
-  cover.append(caption);
+  cover.append(frame, caption);
   return cover;
 }
 
@@ -138,8 +151,10 @@ function coverStatusValue(payload, tripId) {
         : !savedCoverAsset({ id: tripId }, payload)))) {
     throw new Error("Не удалось проверить состояние обложки.");
   }
+  const asset = savedCoverAsset({ id: tripId }, payload);
   return { status: payload.status, available: payload.available, hidden: payload.hidden === true,
     reason: payload.reason === "no_verified_subject" ? "no_verified_subject" : "",
+    subject_label: asset?.subjectLabel || "", subject_location: asset?.subjectLocation || "",
     image_url: payload.status === "ready" && payload.hidden !== true ? payload.image_url : null };
 }
 
@@ -181,7 +196,7 @@ function renderCoverControls(session) {
   const text = session.error || (session.visibilityBusy ? "Сохраняю видимость обложки. Новая генерация не запускается…"
     : session.posting ? "Отправляю один запрос на создание обложки…"
     : status?.status === "ready" && status.hidden ? "ИИ-обложка скрыта. Её можно вернуть без новой генерации."
-    : status?.reason === "no_verified_subject" ? "Пока нет подтверждённой достопримечательности для обложки. Используется нейтральное оформление; платная генерация не запускается."
+    : status?.reason === "no_verified_subject" ? "Не удалось выбрать подходящее место из сохранённого маршрута для обложки. Это не означает, что в городе нет достопримечательностей. Используется нейтральное оформление; платная генерация не запускается."
     : status ? COVER_COPY[status.status] : "Проверяю сохранённую обложку…");
   panel.append(node("p", "cover-status", text));
   if (status?.status === "ready") {
@@ -1075,6 +1090,68 @@ function renderTripHeader() {
   if (editReason) copy.append(node("p", "trip-header-meta", editReason));
   else if (state.trip.edit_scope_note) copy.append(node("p", "trip-header-meta", state.trip.edit_scope_note));
   actions.append(pdf, edit, createDeleteTripButton(state.trip));
+  if (state.trip.country_correction_available === true) {
+    const snapshot = state.trip, account = state.me, viewRevision = state.viewRevision;
+    const form = node("form", "country-correction-form");
+    form.hidden = true;
+    const label = node("label", "form-field", "Страна поездки");
+    const input = node("input");
+    input.type = "text"; input.required = true; input.minLength = 2; input.maxLength = 80;
+    input.placeholder = "Например: Россия";
+    input.setAttribute("aria-label", "Добавить страну сохранённой поездки");
+    label.append(input);
+    const save = node("button", "button button-primary", "Сохранить страну");
+    save.type = "submit";
+    const message = node("p", "trip-header-meta", "Добавляется только страна. Программа и обложка не пересоздаются, попытка не расходуется.");
+    message.setAttribute("role", "status");
+    form.append(label, save, message);
+    const open = button("Указать страну", "button button-ghost", () => {
+      if (state.me !== account || state.trip !== snapshot || state.viewRevision !== viewRevision) return;
+      form.hidden = !form.hidden;
+      if (!form.hidden) input.focus();
+    });
+    let pending = false;
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const current = () => state.me === account && state.trip === snapshot && state.viewRevision === viewRevision;
+      if (pending || save.disabled || !current() || state.deletingTrips.has(Number(snapshot.id))) return;
+      const country = input.value.trim();
+      if (country.length < 2 || country.length > 80) {
+        message.textContent = "Укажите страну (от 2 до 80 символов).";
+        input.focus(); return;
+      }
+      pending = true; input.disabled = save.disabled = true;
+      message.textContent = "Проверяю страну по сохранённым данным…";
+      let changed = false, uncertain = false;
+      try {
+        const result = await api(`/api/trips/${snapshot.id}/country`, { method: "PATCH",
+          body: JSON.stringify({ country, expected_revision: snapshot.revision }) });
+        if (!result || result.id !== snapshot.id || result.changed !== true) throw new Error("Не удалось подтвердить изменение. Обновите страницу.");
+        changed = true;
+        if (!current()) return;
+        message.textContent = "Страна сохранена. Обновляю поездку…";
+        const updated = await api(`/api/trips/${snapshot.id}`);
+        if (current()) {
+          state.trip = updated;
+          state.coverCache.delete(Number(snapshot.id));
+          renderTrip();
+          toast("Страна добавлена. Маршрут и обложка сохранены без изменений.");
+        }
+        if (state.me === account) await refreshTripSummary(account);
+      } catch (error) {
+        uncertain = !error.status;
+        if (current()) message.textContent = changed
+          ? "Страна сохранена, но экран не обновился. Обновите страницу; повторно сохранять не нужно."
+          : (error.status ? error.message : "Не удалось подтвердить результат. Обновите страницу перед повторным сохранением.");
+      } finally {
+        pending = false;
+        // An uncertain network response must not encourage a repeated mutation.
+        input.disabled = save.disabled = changed || uncertain;
+      }
+    });
+    actions.append(open);
+    copy.append(form);
+  }
   header.append(copy, actions);
 }
 
@@ -1098,6 +1175,11 @@ function renderDayTabs() {
 
 function selectedDay() {
   return state.trip.itinerary.days.find((day) => day.day === state.selectedDay);
+}
+
+function displayPlaceTitle(item) {
+  return typeof item.display_title === "string" && item.display_title.length <= 420
+    && item.display_title.trim() ? item.display_title : item.title;
 }
 
 function renderSelectedDay() {
@@ -1124,7 +1206,7 @@ function renderSelectedDay() {
     const row = node("article", "timeline-item");
     const time = node("div", "timeline-time", item.time);
     const copy = node("div", "timeline-copy");
-    copy.append(node("h3", "", item.title));
+    copy.append(node("h3", "", displayPlaceTitle(item)));
     if (item.description) copy.append(node("p", "", item.description));
     if (state.trip.request.children_ages?.length && item.kids_note) {
       copy.append(node("p", "kids-note", `Для детей: ${item.kids_note}`));
@@ -1181,7 +1263,7 @@ function renderMap(dayNumber) {
   points.forEach((point, index) => {
     const coordinates = [point.lat, point.lon];
     bounds.push(coordinates);
-    const tooltip = node("span", "", `${index + 1}. ${point.title}`);
+    const tooltip = node("span", "", `${index + 1}. ${displayPlaceTitle(point)}`);
     window.L.circleMarker(coordinates, {
       radius: 10,
       color: "#ffffff",
@@ -1486,6 +1568,7 @@ function syncBudgetPreview() {
 
 function newTripPayload() {
   const destination = $("tripDestination").value.trim();
+  const country = $("tripCountry").value.trim();
   const destinationKind = $("tripDestinationKind").value;
   const startDate = $("tripStartDate").value;
   const endDate = $("tripEndDate").value;
@@ -1510,6 +1593,11 @@ function newTripPayload() {
   }
   if (destination.length < 2) {
     throw new Error(destinationKind === "region" ? "Укажите территорию поездки." : "Укажите город поездки.");
+  }
+  if (country.length < 2 || country.length > 80) {
+    $("tripCountry").setAttribute("aria-invalid", "true");
+    $("tripCountry").focus();
+    throw new Error("Укажите страну поездки в отдельном поле. Без страны генерация не запускается.");
   }
   if (!startDate || !endDate) throw new Error("Укажите даты начала и окончания.");
   if (endDate < startDate) {
@@ -1556,6 +1644,7 @@ function newTripPayload() {
 
   return {
     destination,
+    country,
     destination_kind: destinationKind,
     start_date: startDate,
     end_date: endDate,
@@ -1784,14 +1873,33 @@ function showCityClarification(clarification, account, draft) {
     if (!$("infoDialog").open) return;
     $("tripDestinationKind").value = "city";
     syncDestinationKind();
-    if (destination) $("tripDestination").value = destination;
+    if (destination) {
+      $("tripDestination").value = destination;
+      $("tripCountry").value = destination.split(",").at(-1).trim();
+      $("tripCountry").setAttribute("aria-invalid", "false");
+    }
     $("savedTripNotice").hidden = true;
     $("newTripMessage").textContent = hasDraft
       ? "Направление можно уточнить. Остальные поля анкеты сохранены. Проверьте их и нажмите кнопку создания, когда будете готовы."
       : "Заполните остальные поля анкеты и нажмите кнопку создания, когда будете готовы. Автоматическая генерация не запускалась.";
     $("tripDestination").focus();
   };
-  for (const option of options) $("savedTripNotice").append(button(option, "button button-ghost", () => choose(option)));
+  for (const option of options) {
+    const choice = button(option, "button button-ghost city-choice", () => choose(option));
+    const details = Array.isArray(clarification.details) ? clarification.details.filter((value) => value?.label === option) : [];
+    if (details.length === 1) {
+      const detail = details[0], facts = [];
+      // Display only. These fields never become the submitted destination.
+      for (const [key, prefix] of [["feature_label", ""], ["admin2", "Административная единица: "]]) {
+        const value = detail[key];
+        if (typeof value === "string" && value.length <= 100 && /^[\p{L}\p{M}\p{N} ,\-'’().–—]+$/u.test(value)) facts.push(prefix + value);
+      }
+      if (Number.isInteger(detail.population) && detail.population > 0 && detail.population <= 100000000)
+        facts.push(`Население по справочнику: ${detail.population.toLocaleString("ru-RU")}`);
+      if (facts.length) choice.append(node("span", "city-choice-details", facts.join(" · ")));
+    }
+    $("savedTripNotice").append(choice);
+  }
   $("savedTripNotice").append(button("Уточнить направление вручную", "button button-ghost", () => choose(null)));
 }
 
@@ -2079,6 +2187,7 @@ function bindEvents() {
   });
   $("tripNoChildren").addEventListener("change", syncChildrenMode);
   $("tripDestinationKind").addEventListener("change", syncDestinationKind);
+  $("tripCountry").addEventListener("input", () => $("tripCountry").setAttribute("aria-invalid", "false"));
   $("tripLocationPreference").addEventListener("change", syncLocationMode);
   ["tripBudget", "tripTravelCost", "tripLodgingCost", "tripCurrency"].forEach((id) => {
     $(id).addEventListener("input", syncBudgetPreview);

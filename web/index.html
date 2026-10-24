@@ -7,7 +7,7 @@
   <title>Семейный планировщик путешествий</title>
   <link rel="icon" href="/static/favicon.svg?v=20261022-premium-travel" type="image/svg+xml">
   <link rel="stylesheet" href="/static/vendor/leaflet.css">
-  <link rel="stylesheet" href="/static/styles.css?v=20261024-london-quality">
+  <link rel="stylesheet" href="/static/styles.css?v=20261024-cover-framing">
 </head>
 <body>
   <div class="page-glow page-glow-one"></div>
@@ -187,8 +187,13 @@
           <small id="tripDestinationHint">Для города маршрут планируется в городском радиусе.</small>
         </label>
         <label class="form-field form-span-2" for="tripDestination">
-          <span id="tripDestinationLabel">Город и страна</span>
-          <input id="tripDestination" name="destination" type="text" minlength="2" maxlength="100" placeholder="Например: Казань, Россия" autocomplete="off" required>
+          <span id="tripDestinationLabel">Город</span>
+          <input id="tripDestination" name="destination" type="text" minlength="2" maxlength="100" placeholder="Например: Казань" autocomplete="off" required>
+        </label>
+        <label class="form-field form-span-2" for="tripCountry">
+          <span>Страна — обязательно</span>
+          <input id="tripCountry" name="country" type="text" minlength="2" maxlength="80" placeholder="Например: Россия" autocomplete="country-name" aria-describedby="tripCountryHint" required>
+          <small id="tripCountryHint">Для Сингапура и Ватикана повторите название в обоих полях.</small>
         </label>
         <label class="form-field" for="tripStartDate">
           <span>Дата начала</span>
@@ -305,6 +310,6 @@
   <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
 
   <script src="/static/vendor/leaflet.js"></script>
-  <script src="/static/app.js?v=20261024-london-quality" defer></script>
+  <script src="/static/app.js?v=20261024-cover-framing" defer></script>
 </body>
 </html>

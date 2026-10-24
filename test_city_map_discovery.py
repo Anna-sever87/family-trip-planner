@@ -92,10 +92,11 @@ class MapFirstDiscoveryTests(unittest.TestCase):
         self.assertEqual(len(result.candidates), 24)
         self.assertTrue(all(result.diagnostics["category_counts"].values()))
         self.assertEqual(result.diagnostics["missing_categories"], [])
-        # All categories can be present while their short visit estimates still
-        # fall below the requested pace; category coverage alone is not fullness.
-        self.assertEqual(result.diagnostics["pool_quality"], "limited")
-        self.assertLess(result.diagnostics["planning_minutes"], result.diagnostics["required_planning_minutes"])
+        # Six independent full zoos use fixed 120-minute product blocks, not
+        # generic 45-minute stops. This aggregate still does not prove packing.
+        self.assertEqual(result.diagnostics["pool_quality"], "adequate")
+        self.assertEqual(result.diagnostics["planning_minutes"], 6 * (90 + 120 + 45 + 90))
+        self.assertGreaterEqual(result.diagnostics["planning_minutes"], result.diagnostics["required_planning_minutes"])
         self.assertTrue(result.diagnostics["replenishment_attempted"])
         self.assertLessEqual(result.map_requests, 36)
         self.assertEqual(result.usage["completion_calls"], 1)

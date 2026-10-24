@@ -534,11 +534,59 @@ test("region hint and route header disclose the lake shoreline margin without ch
   ui.element("tripDestinationKind").value = "city";
   ui.context.syncDestinationKind();
   assert.match(ui.element("tripDestinationHint").textContent, /Маршрут планируется в городском радиусе/);
-  assert.match(ui.element("tripDestinationHint").textContent, /Москва, Москва, Россия/);
-  assert.match(ui.element("tripDestinationHint").textContent, /Сингапур, Сингапур.*Ватикан, Ватикан/);
+  assert.match(ui.element("tripDestinationHint").textContent, /выберите подходящий регион/);
+  assert.match(ui.element("tripDestinationHint").textContent, /Страну.*отдельном обязательном поле/);
   ui.state.trip.request.destination_kind = "city";
   ui.context.renderTripHeader();
   assert.ok(!elementText(ui.element("tripHeader")).includes("береговая зона"));
+});
+
+function countryCorrectionForm(ui) {
+  ui.state.trip = { ...detailTrip(), revision: 4, country_correction_available: true };
+  ui.element("tripView").hidden = false;
+  ui.context.renderTripHeader();
+  const copy = ui.element("tripHeader").children[0];
+  const form = copy.children.find((child) => child.tagName === "FORM");
+  return { form, input: form.children[0].children[0], save: form.children[1], message: form.children[2] };
+}
+
+test("saved country correction is explicit, revision-bound and no paid route endpoint is called", async () => {
+  const ui = browser(), controls = countryCorrectionForm(ui), calls = [];
+  controls.input.value = "Россия";
+  const snapshot = ui.state.trip;
+  ui.context.api = async (url, options) => {
+    calls.push([url, options]);
+    return options ? { id: snapshot.id, changed: true, revision: 5 }
+      : { ...snapshot, destination: "Хабаровск, Россия", revision: 5, country_correction_available: false };
+  };
+  await controls.form.listeners.get("submit")({ preventDefault() {} });
+  assert.equal(calls.length, 2);
+  assert.equal(calls[0][0], `/api/trips/${snapshot.id}/country`);
+  assert.equal(calls[0][1].method, "PATCH");
+  assert.deepEqual(JSON.parse(calls[0][1].body), { country: "Россия", expected_revision: 4 });
+  assert.equal(ui.state.trip.revision, 5);
+  assert.equal(ui.summaryRefreshes, 1);
+});
+
+test("late or uncertain country response cannot replace a new view or silently retry", async () => {
+  for (const mode of ["navigation", "uncertain"]) {
+    const ui = browser(), controls = countryCorrectionForm(ui), reply = deferred();
+    controls.input.value = "Россия";
+    let calls = 0;
+    ui.context.api = async () => { calls += 1; return reply.promise; };
+    const pending = controls.form.listeners.get("submit")({ preventDefault() {} });
+    await controls.form.listeners.get("submit")({ preventDefault() {} });
+    if (mode === "navigation") {
+      const oldId = ui.state.trip.id;
+      ui.context.showTrips();
+      reply.resolve({ id: oldId, changed: true });
+    } else reply.reject(new Error("Network error"));
+    await pending;
+    assert.equal(calls, 1);
+    assert.equal(controls.save.disabled, true);
+    if (mode === "navigation") assert.equal(ui.state.trip, null);
+    else assert.match(controls.message.textContent, /Обновите страницу/);
+  }
 });
 
 function creationBrowser() {
@@ -557,7 +605,7 @@ function realCreationForm() {
   ui.state.me = { name: "Offline user", adults: 2, children_ages: [5], currency: "RUB",
     pace: "средний", wishes: "Только Байкал и побережье, без Иркутска" };
   ui.context.openNewTripDialog();
-  for (const [id, value] of Object.entries({ tripDestination: "Сочи, Россия", tripStartDate: "2099-06-01",
+  for (const [id, value] of Object.entries({ tripDestination: "Сочи, Россия", tripCountry: "Россия", tripStartDate: "2099-06-01",
     tripEndDate: "2099-06-04", tripBudget: "60000", tripTravelCost: "10000", tripLodgingCost: "15000" })) {
     ui.element(id).value = value;
   }
@@ -566,6 +614,32 @@ function realCreationForm() {
   ui.element("newTripForm").controls = [ui.element("tripWishes")];
   return ui;
 }
+
+test("missing separate country blocks submit before API and focuses invalid field", async () => {
+  const ui = realCreationForm();
+  ui.element("tripCountry").value = " ";
+  let focused = false, calls = 0;
+  ui.element("tripCountry").focus = () => { focused = true; };
+  ui.context.api = async () => { calls += 1; };
+  await ui.context.submitNewTrip({ preventDefault() {} });
+  assert.equal(calls, 0);
+  assert.equal(focused, true);
+  assert.equal(ui.element("tripCountry")["aria-invalid"], "true");
+  assert.match(ui.element("newTripMessage").textContent, /Укажите страну/);
+  ui.element("tripCountry").value = "Россия";
+  ui.element("tripCountry").dispatch("input");
+  assert.equal(ui.element("tripCountry")["aria-invalid"], "false");
+  assert.equal(ui.context.newTripPayload().country, "Россия");
+});
+
+test("country is explicit and not inferred from city or state", () => {
+  const ui = realCreationForm();
+  ui.element("tripDestination").value = "Сингапур";
+  ui.element("tripCountry").value = "Сингапур";
+  const payload = ui.context.newTripPayload();
+  assert.equal(payload.destination, "Сингапур");
+  assert.equal(payload.country, "Сингапур");
+});
 
 test("new trip starts without previous destination wishes and retains shared profile defaults", () => {
   const ui = realCreationForm();
@@ -752,8 +826,8 @@ test("covers label AI artwork and missing assets degrade to a neutral atlas with
   const ui = browser();
   const cover = ui.context.createTripCover({ destination: "Москва, Россия",
     start_date: "2026-10-28", end_date: "2026-10-30" });
-  const photo = cover.children.find((child) => child.tagName === "IMG");
-  const placeholder = cover.children[0];
+  const photo = cover.children[0].children.find((child) => child.tagName === "IMG");
+  const placeholder = cover.children[0].children[0];
   assert.ok(photo);
   assert.equal(photo.loading, "lazy");
   assert.equal(placeholder.hidden, true);
@@ -761,12 +835,54 @@ test("covers label AI artwork and missing assets degrade to a neutral atlas with
   photo.dispatch("error");
   assert.equal(photo.hidden, true);
   assert.equal(placeholder.hidden, false);
-  assert.equal(cover.children.at(-1).textContent, "Иллюстрация путешествия");
+  assert.equal(elementText(cover.children.at(-1)).trim(), "Иллюстрация путешествия");
   assert.equal(photo.src, "/static/images/moscow.png", "failure must not call another provider or retry a loop");
   const generic = ui.context.createTripCover({ destination: "Марс" }, true);
-  assert.ok(!generic.children.some((child) => child.tagName === "IMG"));
-  assert.equal(generic.children[0].hidden, false);
-  assert.equal(generic.children.at(-1).textContent, "Иллюстрация путешествия");
+  assert.ok(!generic.children[0].children.some((child) => child.tagName === "IMG"));
+  assert.equal(generic.children[0].children[0].hidden, false);
+  assert.equal(elementText(generic.children.at(-1)).trim(), "Иллюстрация путешествия");
+});
+
+test("immutable cover subject is a separate plain-text caption and clears on image failure", () => {
+  const ui = browser();
+  const status = { status: "ready", hidden: false, image_url: "/api/trips/101/cover/image",
+    subject_label: "British Museum", subject_location: "Greater London, United Kingdom" };
+  for (const detail of [false, true]) {
+    const cover = ui.context.createTripCover({ id: 101, destination: "Изменённый маршрут" }, detail, status);
+    const [frame, caption] = cover.children;
+    assert.equal(frame.className, "trip-cover-frame");
+    assert.equal(caption.className, "cover-caption");
+    assert.match(elementText(caption), /На иллюстрации: British Museum · Greater London, United Kingdom/);
+    assert.match(elementText(caption), /ИИ-иллюстрация · не фотография/);
+    const photo = frame.children.find((child) => child.tagName === "IMG");
+    assert.match(photo.alt, /British Museum/);
+    assert.ok(!photo.alt.includes("Изменённый"));
+    photo.dispatch("error");
+    assert.equal(elementText(caption).trim(), "Иллюстрация путешествия");
+    assert.equal(photo.hidden, true);
+  }
+  const unsafe = { ...status, subject_label: '<img src=x onerror="alert(1)">' };
+  const cover = ui.context.createTripCover({ id: 101 }, true, unsafe);
+  assert.equal(cover.children[1].children[0].tagName, "SPAN");
+  assert.ok(cover.children[1].children[0].textContent.includes(unsafe.subject_label));
+  for (const subject_label of [undefined, null, {}, "", "x".repeat(161)]) {
+    const asset = ui.context.savedCoverAsset({ id: 101, destination: "Лондон" }, { ...status, subject_label });
+    assert.equal(asset.subjectLabel, "");
+    assert.equal(asset.subjectLocation, "");
+    assert.equal(asset.alt, "ИИ-иллюстрация поездки; не фотография");
+  }
+  assert.equal(ui.context.savedCoverAsset({ id: 101 }, { ...status, hidden: true }), null);
+});
+
+test("cover framing contains the whole image and never zooms on hover or overlays its caption", () => {
+  const css = fs.readFileSync(path.join(__dirname, "web/static/styles.css"), "utf8");
+  const imageRule = css.match(/\.trip-card-cover img, \.trip-detail-cover img\s*\{([^}]+)\}/)[1];
+  assert.match(imageRule, /object-fit:\s*contain/);
+  assert.match(imageRule, /object-position:\s*center/);
+  assert.doesNotMatch(css, /\.trip-card:hover \.trip-card-cover img/);
+  const captionRule = css.match(/\.cover-caption\s*\{([^}]+)\}/)[1];
+  assert.doesNotMatch(captionRule, /position:\s*absolute/);
+  assert.match(captionRule, /overflow-wrap:\s*anywhere/);
 });
 
 test("premium cards retain original Open/PDF actions and exact supplied costs", () => {
@@ -1077,12 +1193,16 @@ test("saved cover accepts only the exact current trip private image URL even whi
     assert.equal(ui.context.savedCoverAsset({ id: 101 }, { status: "ready", image_url }), null);
     assert.throws(() => ui.context.coverStatusValue({ status: "ready", available: true, image_url }, 101));
   }
-  ui.context.api = async () => coverPayload("ready", false);
+  ui.context.api = async () => ({ ...coverPayload("ready", false),
+    subject_label: "British Museum", subject_location: "Greater London, United Kingdom" });
   ui.context.startTripCoverView();
   await settleCovers();
-  const image = ui.element("tripHero").children[0].children.find((child) => child.tagName === "IMG");
+  const image = ui.element("tripHero").children[0].children[0].children.find((child) => child.tagName === "IMG");
   assert.equal(image.src, "/api/trips/101/cover/image");
   assert.match(image.alt, /ИИ-иллюстрация.*не фотография/);
+  assert.match(image.alt, /British Museum/);
+  assert.match(elementText(ui.element("tripHero")), /На иллюстрации: British Museum/);
+  assert.equal(ui.context.cachedCover(101).value.subject_label, "British Museum");
   assert.ok(!elementText(ui.element("tripCoverControls")).includes("Создать ИИ-обложку"));
   assert.equal(ui.timers.size, 0);
 });
@@ -1102,7 +1222,7 @@ test("ready covers hide and restore through PATCH without confirmation, POST, re
   ui.element("tripCoverControls").children[1].dispatch("click");
   await settleCovers();
   assert.equal(hidden, true);
-  assert.equal(ui.element("tripHero").children[0].children.find((child) => child.tagName === "IMG").src,
+  assert.equal(ui.element("tripHero").children[0].children[0].children.find((child) => child.tagName === "IMG").src,
     "/static/images/baikal.png");
   assert.match(elementText(ui.element("tripCoverControls")), /ИИ-обложка скрыта.*можно вернуть без новой генерации/);
   assert.match(elementText(ui.element("tripCoverControls")), /Вернуть ИИ-обложку/);
@@ -1110,7 +1230,7 @@ test("ready covers hide and restore through PATCH without confirmation, POST, re
   ui.element("tripCoverControls").children[1].dispatch("click");
   await settleCovers();
   assert.equal(hidden, false);
-  assert.equal(ui.element("tripHero").children[0].children.find((child) => child.tagName === "IMG").src,
+  assert.equal(ui.element("tripHero").children[0].children[0].children.find((child) => child.tagName === "IMG").src,
     "/api/trips/101/cover/image");
   assert.deepEqual(calls.map(([, method]) => method), ["GET", "PATCH", "PATCH"]);
   assert.deepEqual(calls.filter(([, method]) => method === "PATCH").map(([, , body]) => JSON.parse(body)),
@@ -1140,8 +1260,8 @@ test("hidden cards show a local illustration or a neutral atlas and never load t
   const mounts = [{ trip: detailTrip(101), mount: new FakeElement() },
     { trip: { ...detailTrip(202), destination: "Воркута, Россия" }, mount: new FakeElement() }];
   await ui.context.hydrateTripCardCovers(mounts, ui.state.coverListRevision);
-  assert.equal(mounts[0].mount.children.find((child) => child.tagName === "IMG").src, "/static/images/baikal.png");
-  assert.ok(!mounts[1].mount.children.some((child) => child.tagName === "IMG"));
+  assert.equal(mounts[0].mount.children[0].children.find((child) => child.tagName === "IMG").src, "/static/images/baikal.png");
+  assert.ok(!mounts[1].mount.children[0].children.some((child) => child.tagName === "IMG"));
   assert.match(elementText(mounts[1].mount), /Иллюстрация путешествия/);
   assert.deepEqual(calls, ["GET", "GET"]);
 });
@@ -1343,7 +1463,7 @@ test("lost image POST response leaves read-only recovery and never repeats submi
   await settleCovers();
   await ui.context.submitTripCover(ui.state.coverView);
   assert.deepEqual(calls, ["GET", "POST", "GET"]);
-  assert.equal(ui.element("tripHero").children[0].children.find((child) => child.tagName === "IMG").src,
+  assert.equal(ui.element("tripHero").children[0].children[0].children.find((child) => child.tagName === "IMG").src,
     "/api/trips/101/cover/image");
 });
 
@@ -1380,7 +1500,7 @@ test("unconfirmed cover subject explains free fallback without a paid action", a
   ui.context.startTripCoverView();
   await settleCovers();
   const text = elementText(ui.element("tripCoverControls"));
-  assert.match(text, /Пока нет подтверждённой достопримечательности/);
+  assert.match(text, /Не удалось выбрать подходящее место из сохранённого маршрута/);
   assert.match(text, /платная генерация не запускается/);
   assert.ok(!text.includes("Создать ИИ-обложку"));
   assert.deepEqual(methods, ["GET"]);
@@ -1405,7 +1525,7 @@ test("card cover hydration uses at most 24 reads with concurrency three and sess
   await ui.context.hydrateTripCardCovers(mounts, ui.state.coverListRevision);
   assert.equal(calls, 24);
   assert.ok(peak <= 3);
-  assert.equal(mounts[0].mount.children.find((child) => child.tagName === "IMG").src, "/api/trips/1/cover/image");
+  assert.equal(mounts[0].mount.children[0].children.find((child) => child.tagName === "IMG").src, "/api/trips/1/cover/image");
   await ui.context.hydrateTripCardCovers(mounts, ui.state.coverListRevision);
   assert.equal(calls, 24);
   ui.context.clearCoverState();
@@ -1631,6 +1751,44 @@ function ambiguousCityStatus() {
   return { ...jobStatus("failed"), clarification: { kind: "city", attempt_used: false,
     options: ["Москва, Москва, Россия", "Москва, Тверская область, Россия"] } };
 }
+
+test("city options explain capital, administrative area and population without altering submitted identity", async () => {
+  const ui = jobsBrowser();
+  const options = ["Пекин, Пекин, Китай", "Пекин, Шаньси, Китай"];
+  ui.context.api = async () => ({ ...ambiguousCityStatus(), clarification: {
+    kind: "city", attempt_used: false, options,
+    details: [{ label: options[0], feature_label: "Столица страны", admin2: "Пекин", population: 12345678 },
+      { label: options[1], feature_label: "Населённый пункт", admin2: "Юньчэн", population: null }],
+  } });
+  await ui.context.submitNewTrip({ preventDefault() {} });
+  const choice = ui.element("savedTripNotice").children.find((el) => el.textContent === options[0]);
+  assert.match(elementText(choice), /Столица страны/);
+  assert.match(elementText(choice), /Население по справочнику/);
+  choice.dispatch("click");
+  assert.equal(ui.element("tripDestination").value, options[0]);
+  assert.ok(!ui.element("tripDestination").value.includes("Столица"));
+});
+
+test("public Russian place captions render as text in timeline and map without replacing identity", () => {
+  const ui = browser();
+  const item = { title: "合成博物馆", display_title: "合成博物馆 (музей)", kind: "attraction", time: "10:00", verified: true };
+  const point = { ...item, day: 1, lat: 39.9, lon: 116.4 };
+  const before = JSON.stringify({ item, point });
+  ui.state.trip = { request: { children_ages: [], currency: "RUB" },
+    itinerary: { days: [{ day: 1, theme: "Музей", items: [item] }] }, map_points: [point] };
+  const tooltips = [];
+  ui.context.requestAnimationFrame = () => {};
+  ui.context.window.L = {
+    map: () => ({}), tileLayer: () => ({ addTo() {} }),
+    circleMarker: () => ({ addTo() { return this; }, bindTooltip(text) { tooltips.push(text); return this; }, openTooltip() {} }),
+  };
+  ui.context.renderSelectedDay();
+  assert.match(elementText(ui.element("timeline")), /合成博物馆 \(музей\)/);
+  assert.match(tooltips[0].textContent, /合成博物馆 \(музей\)/);
+  assert.equal(JSON.stringify({ item, point }), before);
+  assert.equal(ui.context.displayPlaceTitle({ title: "Original", display_title: "x".repeat(421) }), "Original");
+  assert.equal(ui.context.displayPlaceTitle({ title: "Original", display_title: '<img src=x>' }), '<img src=x>');
+});
 
 test("city choice restores the draft but never submits or stores its private fields", async () => {
   const ui = jobsBrowser();

@@ -69,7 +69,8 @@ DETAIL_REJECTION_REASONS = frozenset({
     "amusement_interest_not_requested", "specialized_animal_reserve_limit",
 })
 _LOCAL_NAME_LANGUAGES = {"vn": "vi,en", "tr": "tr,en"}
-_LOCAL_MAX_TITLES = 14
+# Language choice must not silently reduce the reserve for a longer trip.
+# These countries share the same bounded name/HTTP/candidate budgets below.
 # Do not whitelist ASCII: Vietnamese/Turkish diacritics and other original
 # Unicode names remain valid. The proposal policy only excludes Cyrillic
 # translations for these two explicitly selected countries.
@@ -671,9 +672,6 @@ def ground_city_candidates(request: TripRequest, center: dict, *, completion: Ca
             raise ValueError("country contradicts confirmed city")
         country = parts[-1] if len(parts) > 1 else code.upper()
         center = dict(center, country_code=code)
-        if code in _LOCAL_NAME_LANGUAGES:
-            limit = min(limit, _LOCAL_MAX_TITLES)
-            usable_limit = min(usable_limit, _LOCAL_MAX_TITLES)
     except (TypeError, ValueError, KeyError):
         result.status = "invalid_request"
         result.problems.append("Нужен подтверждённый город с конечными координатами, страной и корректными датами; AI не вызывался.")
@@ -718,8 +716,6 @@ def ground_city_candidates(request: TripRequest, center: dict, *, completion: Ca
     # acceptance floor. All name/HTTP/candidate caps remain unchanged.
     required_minutes = request.days_count * max(minimum, desired_city_program_minutes(request) or minimum)
     usable_limit = min(24, max(usable_limit, math.ceil(required_minutes / 60)))
-    if code in _LOCAL_NAME_LANGUAGES:
-        usable_limit = min(usable_limit, _LOCAL_MAX_TITLES)
     pool_target = min(usable_limit, max(request.days_count, math.ceil(required_minutes / 90)))
     ordinary_overview = (not request.wishes.strip() and request.trip_goal.strip().casefold()
                          in {"", "познакомиться с городом", "познакомиться с городом."})

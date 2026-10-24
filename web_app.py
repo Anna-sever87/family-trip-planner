@@ -156,8 +156,15 @@ class DayEditRequest(BaseModel):
     instruction: str = Field(min_length=3, max_length=600)
 
 
+class CountryCorrectionRequest(BaseModel):
+    model_config = {"extra": "forbid"}
+    country: str = Field(min_length=1, max_length=80)
+    expected_revision: int = Field(ge=1, strict=True)
+
+
 class TripCreateRequest(BaseModel):
     destination: str = Field(min_length=2, max_length=100)
+    country: str | None = Field(default=None, min_length=1, max_length=80)
     destination_kind: Literal["city", "region"] = "city"
     start_date: str = Field(min_length=10, max_length=10)
     end_date: str = Field(min_length=10, max_length=10)
@@ -214,6 +221,7 @@ class TripCreateRequest(BaseModel):
 
     @model_validator(mode="after")
     def validate_schedule_and_location(self):
+        self.destination = web_service.destination_with_country(self.destination, self.country)
         def minutes(value: str) -> int:
             try:
                 hour_text, minute_text = value.split(":", 1)
@@ -465,6 +473,8 @@ async def create_trip(
                 "clarification": {"kind": "city", "options": list(error.destination_options),
                                   "attempt_used": False},
             }
+            if error.destination_details:
+                detail["clarification"]["details"] = list(error.destination_details)
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail=detail,
@@ -507,6 +517,21 @@ def delete_trip(trip_id: int, http_request: Request, tg_id: int = Depends(requir
     except trip_deletion.TripDeleteStorageError as error:
         # This exception is possible only before the route deletion commits.
         raise HTTPException(status_code=503, detail="Не удалось безопасно подготовить удаление файлов. Поездка сохранена.") from error
+
+
+@app.patch("/api/trips/{trip_id}/country")
+def correct_trip_country(trip_id: int, payload: CountryCorrectionRequest, http_request: Request,
+                         tg_id: int = Depends(require_csrf)) -> dict:
+    try:
+        return web_service.correct_trip_country(
+            tg_id, trip_id, payload.country, payload.expected_revision,
+            expected_account_key=http_request.state.account_key,
+            **({"_access_grant": http_request.state.access_grant} if access_control.enabled() else {}),
+        )
+    except (web_service.EditBusyError, web_service.EditConflictError) as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    except web_service.CountryCorrectionError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
 
 
 @app.get("/api/trips/{trip_id}/cover")

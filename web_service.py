@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import logging
+import json
 import math
 import os
+import unicodedata
 from copy import deepcopy
 from datetime import date, datetime
 from typing import Any, Dict, List, Optional
@@ -34,7 +36,8 @@ from planner import (
     paid_interest_cost_warning,
 )
 from schemas import Itinerary, TripRequest
-from weather import CityResolutionError, resolve_city_for_planning, safe_city_suggestions
+from weather import CityResolutionError, resolve_city_for_planning, safe_city_suggestions, safe_city_suggestion_details
+from place_labels import build_place_labels, display_place_title
 
 
 logger = logging.getLogger("web.service")
@@ -69,17 +72,60 @@ class TripDataError(ValueError):
     pass
 
 
+class CountryCorrectionError(ValueError):
+    """A country-only correction could not be proved without changing place."""
+
+
+def _country_label(country: str) -> str:
+    if (not isinstance(country, str) or not country.isprintable()
+            or not 1 <= len(country.strip()) <= 80
+            or not any(unicodedata.category(char).startswith("L") for char in country)
+            or any(unicodedata.category(char)[0] not in "LMN" and char not in " -'’().–—"
+                   for char in country)):
+        raise ValueError("Укажите страну отдельным полем: от 1 до 80 символов, без запятых и служебных знаков.")
+    return " ".join(country.split())
+
+
+def destination_with_country(destination: str, country: Optional[str] = None) -> str:
+    """Combine a separate country without silently replacing an existing one.
+
+    Old complete city[, region], country requests remain supported. A two-part
+    input with a separate conflicting country is ambiguous and rejected; an
+    explicit resolver option may still contain all three components.
+    """
+    from places import _country_identity
+    if not isinstance(destination, str) or not destination.isprintable():
+        raise ValueError("Проверьте название направления и страну.")
+    parts = [" ".join(part.split()) for part in destination.split(",")]
+    if not 1 <= len(parts) <= 3 or any(not part for part in parts):
+        raise ValueError("Укажите город или территорию и страну; при необходимости добавьте регион.")
+    if country is not None:
+        clean_country = _country_label(country)
+        if len(parts) > 1 and _country_identity(parts[-1]) != _country_identity(clean_country):
+            raise ValueError("Страна в направлении не совпадает с отдельным полем. Проверьте оба значения.")
+        if len(parts) == 1:
+            parts.append(clean_country)
+    elif len(parts) == 1:
+        raise ValueError("Укажите страну поездки. Создание маршрута не запускалось; попытка не списана.")
+    _country_label(parts[-1])
+    combined = ", ".join(parts)
+    if not 2 <= len(combined) <= 100:
+        raise ValueError("Направление вместе со страной должно содержать от 2 до 100 символов.")
+    return combined
+
+
 CITY_PREFLIGHT_CODES = frozenset({"city_ambiguous", "city_not_found", "city_unavailable", "city_invalid"})
 
 
 class TripCreateValidationError(ValueError):
     def __init__(self, message: str, *, diagnostic_problems: Optional[List[str]] = None,
-                 code: str = "validation", destination_options=()) -> None:
+                 code: str = "validation", destination_options=(), destination_details=()) -> None:
         self.diagnostic_problems = list(diagnostic_problems or [])
         self.code = code if code in {"insufficient_data", "search_limit", "invalid_request", "validation_error",
                                     "unsupported_preferences", *CITY_PREFLIGHT_CODES} else "validation"
         self.destination_options = (safe_city_suggestions(destination_options)
                                     if self.code == "city_ambiguous" else ())
+        self.destination_details = safe_city_suggestion_details(destination_details, self.destination_options)
         super().__init__(message)
 
 
@@ -163,7 +209,7 @@ def _normalized_trip_request(request: TripRequest) -> TripRequest:
         raise ValueError("Проверьте заполнение анкеты поездки.") from error
 
     destination_kind = getattr(value, "destination_kind", "city")
-    destination = " ".join(value.destination.split())
+    destination = destination_with_country(value.destination)
     if not 2 <= len(destination) <= 100:
         destination_label = (
             "Название города"
@@ -455,6 +501,94 @@ def _validated_trip(tg_id: int, trip_id: int) -> tuple[Dict[str, Any], TripReque
     return trip, request, itinerary
 
 
+def _country_corrected_request(trip: dict, country: Optional[str] = None) -> dict:
+    """Prove that appending a country leaves the saved city and every POI intact."""
+    try:
+        raw_request = trip["request"]
+        request = TripRequest.model_validate(raw_request)
+        itinerary = Itinerary.model_validate(trip["itinerary"])
+        if (request.destination_kind != "city" or not itinerary.city_schedule or itinerary.source_schedule
+                or "," in request.destination
+                or trip.get("destination", request.destination) != request.destination):
+            raise ValueError
+        original_context = raw_request[city_context.CONTEXT_KEY]
+        candidates, center = city_context.load_city_context(original_context, request)
+        city_context.check_context_places(itinerary, candidates)
+        target_country = _country_label(country if country is not None else
+                                        center.get("country") or center["country_code"].upper())
+        destination = destination_with_country(request.destination, target_country)
+        corrected = request.model_copy(update={"destination": destination})
+        # Only the request binding changes. Keep the observation timestamp,
+        # exact records, source metadata and presentation hashes byte-for-field.
+        new_context = deepcopy(original_context)
+        new_context["request_sha256"] = city_context._request_digest(corrected)
+        checked, _ = city_context.load_city_context(new_context, corrected)
+        city_context.check_context_places(itinerary, checked)
+        result = deepcopy(raw_request)
+        result["destination"] = destination
+        result[city_context.CONTEXT_KEY] = new_context
+        return result
+    except (ValueError, TypeError, KeyError, OverflowError, RecursionError) as error:
+        raise CountryCorrectionError(
+            "Добавить эту страну без изменения места не удалось. Можно уточнить только отсутствующую страну "
+            "городской поездки с сохранёнными проверенными данными карты. Маршрут не изменён."
+        ) from error
+
+
+def _country_correction_available(trip: dict) -> bool:
+    try:
+        _country_corrected_request(trip)
+    except CountryCorrectionError:
+        return False
+    return True
+
+
+@access_guard.guard_user_operation
+def correct_trip_country(tg_id: int, trip_id: int, country: str, expected_revision: int, *,
+                         expected_account_key: str) -> dict:
+    """Append the proven country only; no AI, quota, memory, file or cover changes."""
+    if (type(tg_id) is not int or type(trip_id) is not int or trip_id < 1
+            or type(expected_revision) is not int or expected_revision < 1
+            or not isinstance(expected_account_key, str) or not expected_account_key):
+        raise TripNotFoundError("Поездка не найдена.")
+    with db.connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        owner = conn.execute("SELECT 1 FROM users WHERE tg_id=? AND account_key=? AND deletion_token=''",
+                             (tg_id, expected_account_key)).fetchone()
+        row = conn.execute("SELECT * FROM trips WHERE id=? AND tg_id=?", (trip_id, tg_id)).fetchone()
+        if owner is None or row is None:
+            raise TripNotFoundError("Поездка не найдена.")
+        if int(row["revision"]) != expected_revision:
+            raise EditConflictError("Поездка уже изменена. Обновите страницу перед уточнением страны.")
+        busy = (
+            conn.execute("SELECT 1 FROM ai_requests WHERE tg_id=? AND status='running' LIMIT 1", (tg_id,)).fetchone()
+            or conn.execute("SELECT 1 FROM generation_jobs WHERE account_key=? AND status IN ('queued','running') LIMIT 1",
+                            (expected_account_key,)).fetchone()
+            or conn.execute("SELECT 1 FROM reminder_deliveries WHERE trip_id=? AND status='sending' LIMIT 1",
+                            (trip_id,)).fetchone()
+            or db._table_exists(conn, "trip_covers") and conn.execute(
+                "SELECT 1 FROM trip_covers WHERE trip_id=? AND status IN ('queued','running') LIMIT 1", (trip_id,)).fetchone()
+        )
+        if busy:
+            raise EditBusyError("Другая операция с поездкой ещё выполняется. Дождитесь её окончания.")
+        try:
+            saved = {**dict(row), "request": json.loads(row["request_json"]),
+                     "itinerary": json.loads(row["itinerary_json"])}
+        except (ValueError, TypeError) as error:
+            raise CountryCorrectionError("Сохранённые данные поездки повреждены. Маршрут не изменён.") from error
+        updated_request = _country_corrected_request(saved, country)
+        changed = conn.execute(
+            "UPDATE trips SET destination=?,request_json=?,revision=revision+1 "
+            "WHERE id=? AND tg_id=? AND revision=?",
+            (updated_request["destination"], json.dumps(updated_request, ensure_ascii=False, allow_nan=False),
+             trip_id, tg_id, expected_revision),
+        ).rowcount
+        if changed != 1:
+            raise EditConflictError("Поездка уже изменена. Обновите страницу.")
+    return {"id": trip_id, "destination": updated_request["destination"],
+            "revision": expected_revision + 1, "changed": True}
+
+
 def _program_total(itinerary: Itinerary) -> float:
     return round(
         sum(float(item.cost) for day in itinerary.days for item in day.items),
@@ -594,10 +728,12 @@ def get_trip_detail(tg_id: int, trip_id: int) -> Dict[str, Any]:
 
     points = []
     public_itinerary = itinerary.model_dump()
+    place_labels = build_place_labels(trip)
     public_itinerary["program_report_text"] = program_report_text(itinerary)
     public_itinerary["unpriced_visit_note"] = city_unpriced_visit_note(itinerary)
     for day, public_day in zip(itinerary.days, public_itinerary["days"]):
         for item, public_item in zip(day.items, public_day["items"]):
+            public_item["display_title"] = display_place_title(item, place_labels)
             attribution = item_map_attribution(item)
             public_item.update(attribution)
             public_verified = is_public_map_point(item)
@@ -608,6 +744,7 @@ def get_trip_detail(tg_id: int, trip_id: int) -> Dict[str, Any]:
                         "day": day.day,
                         "time": item.time,
                         "title": item.title,
+                        "display_title": public_item["display_title"],
                         "official_name": item.official_name,
                         "verified": True,
                         "lat": item.lat,
@@ -626,6 +763,7 @@ def get_trip_detail(tg_id: int, trip_id: int) -> Dict[str, Any]:
         "created_at": trip.get("created_at"),
         "revision": int(trip.get("revision", 1)),
         "request": request.model_dump(),
+        "country_correction_available": _country_correction_available(trip),
         "edit_available": True,
         "edit_unavailable_reason": "",
         "edit_scope_note": city_context.CITY_EDIT_NOTE if itinerary.city_schedule else "",
@@ -735,7 +873,7 @@ def create_trip(tg_id: int, request: TripRequest, *, expected_account_key: Optio
                     "invalid_response": "city_unavailable"}.get(error.reason, "city_invalid")
             raise TripCreateValidationError(
                 f"{error} Новая поездка не сохранена. Создание маршрута не запускалось; попытка не списана.",
-                code=code, destination_options=error.suggestions,
+                code=code, destination_options=error.suggestions, destination_details=error.suggestion_details,
             ) from error
     claim = db.claim_ai_request(
         tg_id,

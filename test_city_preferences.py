@@ -455,7 +455,8 @@ class CityPreferenceTests(unittest.TestCase):
                 result = select_city_preferences(self.request, pool, completion=completion, allow_depth_repair=True)
             self.assertEqual(result.status, "success")
             self.assertIn(pool[3].candidate_id, result.candidate_priority)
-            self.assertEqual(result.diagnostics["preference_planning_minutes"], 225)
+            self.assertEqual(actual(pool[3], self.request).duration_min, 120)
+            self.assertEqual(result.diagnostics["preference_planning_minutes"], 90 + 90 + 120)
             self.assertFalse(result.diagnostics["selection_repair_attempted"])
             completion.assert_not_called()
 

@@ -2,6 +2,8 @@
 
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack
+from dataclasses import replace
+import hashlib
 from io import BytesIO
 import json
 from pathlib import Path
@@ -123,6 +125,148 @@ class TripCoversTests(unittest.TestCase):
         self.assertEqual(self.manager.get_image(1, self.account, self.trip).data, before_image)
         self.assertEqual(self.rows("cover_attempts"), attempts)
 
+    def test_caption_migration_preserves_old_receipts_and_never_backfills_old_images(self):
+        self.complete()
+        fields = {"subject_label", "subject_location", "subject_image_sha256"}
+        original = {key: value for key, value in self.rows("trip_covers")[0].items() if key not in fields}
+        attempts = self.rows("cover_attempts")
+        image = self.manager.get_image(1, self.account, self.trip).data
+        with db.connect() as conn:
+            schema = conn.execute("SELECT sql FROM sqlite_master WHERE name='trip_covers'").fetchone()[0]
+            for name in fields:
+                schema = schema.replace(f"{name} TEXT NOT NULL DEFAULT '',", "")
+            conn.execute("DROP TABLE trip_covers")
+            conn.execute(schema)
+            conn.execute("INSERT INTO trip_covers(" + ",".join(original) + ") VALUES(" +
+                         ",".join("?" for _ in original) + ")", tuple(original.values()))
+        covers.init_schema()
+        covers.init_schema()
+        self.assertEqual(self.rows("trip_covers"), [{**original, **dict.fromkeys(fields, "")}])
+        with db.connect() as conn:
+            columns = {row["name"]: row for row in conn.execute("PRAGMA table_info(trip_covers)")}
+        for name in fields:
+            self.assertEqual((columns[name]["type"], columns[name]["notnull"], columns[name]["dflt_value"]),
+                             ("TEXT", 1, "''"))
+        before = Path(db.DB_PATH).read_bytes()
+        with patch.object(covers, "_prompt_for", side_effect=AssertionError("Never guess old image subject")):
+            status = self.status()
+            self.assertEqual((status["subject_label"], status["subject_location"]), ("", ""))
+            self.assertEqual(self.submit(), status)
+        self.assertEqual(Path(db.DB_PATH).read_bytes(), before)
+        self.assertEqual(self.rows("cover_attempts"), attempts)
+        self.assertEqual(self.manager.get_image(1, self.account, self.trip).data, image)
+
+    def test_caption_is_claimed_before_paid_submit_and_bound_to_validated_image_bytes(self):
+        def provider(prompt):
+            row = self.rows("trip_covers")[0]
+            self.assertEqual(row["status"], "running")
+            self.assertEqual((row["subject_label"], row["subject_location"]),
+                             (prompt.subject_label, prompt.subject_location))
+            self.assertTrue(row["subject_label"])
+            self.assertTrue(row["subject_location"])
+            self.assertEqual(row["subject_image_sha256"], "")
+            return yandex_art.ArtOperation("synthetic-operation", True, self.image)
+        self.submission.side_effect = provider
+        queued = self.submit()
+        self.assertEqual((queued["subject_label"], queued["subject_location"]), ("", ""))
+        self.submission.assert_not_called()
+        self.assertTrue(self.rows("trip_covers")[0]["subject_label"])
+        self.manager.executor.run_next()
+        row = self.rows("trip_covers")[0]
+        self.assertEqual(row["subject_image_sha256"], hashlib.sha256(self.image.data).hexdigest())
+        status = self.status()
+        self.assertEqual((status["subject_label"], status["subject_location"]),
+                         (row["subject_label"], row["subject_location"]))
+        self.assertNotIn("sha256", json.dumps(status))
+        self.assertNotIn("cache_key", json.dumps(status))
+        self.assertNotIn("private-family-information", json.dumps(status))
+        self.submission.assert_called_once()
+
+    def test_ready_caption_survives_trip_edit_and_restart_without_new_selection(self):
+        original = self.complete()
+        with db.connect() as conn:
+            conn.execute("UPDATE trips SET destination='Other City, Other Country' WHERE id=?", (self.trip,))
+        self.manager.close()
+        self.manager.start()
+        before = Path(db.DB_PATH).read_bytes()
+        with patch.object(covers, "_prompt_for", side_effect=AssertionError("No current selection for ready image")):
+            self.assertEqual(self.status(), original)
+            self.assertEqual(self.submit(), original)
+        self.assertEqual(Path(db.DB_PATH).read_bytes(), before)
+        self.submission.assert_called_once()
+
+    def test_hidden_and_reviewed_override_never_borrow_original_caption(self):
+        original = self.complete()
+        self.assertTrue(original["subject_label"])
+        hidden = self.manager.set_hidden(1, self.account, self.trip, True)
+        self.assertEqual((hidden["subject_label"], hidden["subject_location"]), ("", ""))
+        restored = self.manager.set_hidden(1, self.account, self.trip, False)
+        self.assertEqual(restored, original)
+        reviewed = self.install()
+        self.assertEqual(reviewed["status"], "ready")
+        self.assertEqual((reviewed["subject_label"], reviewed["subject_location"]), ("", ""))
+        self.assertTrue(self.rows("trip_covers")[0]["subject_label"])
+        self.assertEqual(self.manager.get_image(1, self.account, self.trip).data, self.reviewed_image().data)
+        self.submission.assert_called_once()
+
+    def test_changed_valid_image_bytes_suppress_caption_without_retry(self):
+        self.complete()
+        row = self.rows("trip_covers")[0]
+        replacement = self.reviewed_image()
+        (self.manager.cache_dir / row["file_name"]).write_bytes(replacement.data)
+        status = self.status()
+        self.assertEqual(status["status"], "ready")
+        self.assertEqual((status["subject_label"], status["subject_location"]), ("", ""))
+        self.assertEqual(self.manager.get_image(1, self.account, self.trip).data, replacement.data)
+        self.assertEqual(self.rows("trip_covers"), [row])
+        self.submission.assert_called_once()
+
+    def test_malformed_caption_metadata_is_not_public_and_is_not_repaired_on_read(self):
+        self.complete()
+        row = self.rows("trip_covers")[0]
+        for label, location, digest in (
+            ("<script>bad</script>", row["subject_location"], row["subject_image_sha256"]),
+            ("Synthetic\nSubject", row["subject_location"], row["subject_image_sha256"]),
+            ("Synthetic\u202eSubject", row["subject_location"], row["subject_image_sha256"]),
+            ("x" * 121, row["subject_location"], row["subject_image_sha256"]),
+            (row["subject_label"], "x" * 241, row["subject_image_sha256"]),
+            (row["subject_label"], "", row["subject_image_sha256"]),
+            (row["subject_label"], row["subject_location"], "bad-hash"),
+        ):
+            with self.subTest(label=label[:16], location_length=len(location), digest_length=len(digest)):
+                with db.connect() as conn:
+                    conn.execute("UPDATE trip_covers SET subject_label=?,subject_location=?,subject_image_sha256=?",
+                                 (label, location, digest))
+                before = Path(db.DB_PATH).read_bytes()
+                self.assertEqual((self.status()["subject_label"], self.status()["subject_location"]), ("", ""))
+                self.assertEqual(Path(db.DB_PATH).read_bytes(), before)
+        self.submission.assert_called_once()
+
+    def test_changed_prompt_after_claim_cannot_submit_or_caption_another_subject(self):
+        self.submit()
+        function, args = self.manager.executor.calls.pop(0)
+        changed = replace(args[3], subject_label="Different public subject")
+        function(*(*args[:3], changed, *args[4:]))
+        self.submission.assert_not_called()
+        self.assertEqual(self.status()["status"], "interrupted")
+        self.assertEqual((self.status()["subject_label"], self.status()["subject_location"]), ("", ""))
+        self.assertEqual(len(self.rows("cover_attempts")), 1)
+
+    def test_invalid_caption_is_rejected_before_attempt_or_dispatch(self):
+        with db.connect() as conn:
+            trip = covers._owned_trip(conn, 1, self.account, self.trip)
+        prompt = covers._prompt_for(trip)
+        for label, location in (("<b>Unsafe</b>", "Synthetic City"), ("Synthetic", "City\nCountry"),
+                                ("x" * 121, "Synthetic City"), ("Synthetic", "x" * 241)):
+            with self.subTest(label=label[:12], location_length=len(location)), patch.object(
+                    covers, "_prompt_for", return_value=replace(prompt, subject_label=label, subject_location=location)):
+                with self.assertRaises(covers.CoverDestinationError):
+                    self.submit()
+        self.assertEqual(self.rows("cover_attempts"), [])
+        self.assertEqual(self.rows("trip_covers"), [])
+        self.assertEqual(self.manager.executor.calls, [])
+        self.submission.assert_not_called()
+
     def test_get_is_readonly_and_does_not_submit_or_reserve(self):
         before = Path(db.DB_PATH).read_bytes()
         for _ in range(3):
@@ -166,7 +310,7 @@ class TripCoversTests(unittest.TestCase):
         prompt = self.submission.call_args.args[0]
         self.assertEqual(prompt.template_key, "saved-attraction")
         self.assertIn("Театр Северный", prompt.provider_prompt)
-        self.assertIn("Камера на земле", prompt.provider_prompt)
+        self.assertIn("Общий внешний план с земли издалека", prompt.provider_prompt)
         self.assertNotIn("private-family-information", prompt.provider_prompt + prompt.user_prompt)
         self.assertNotIn("Private or AI prose", prompt.provider_prompt + prompt.user_prompt)
         self.assertEqual(self.status(trip)["status"], "ready")
@@ -291,7 +435,11 @@ class TripCoversTests(unittest.TestCase):
         self.assertIn("Россия", prompt.user_prompt)
         self.assertNotIn("private-family-information", repr(prompt))
         metadata = json.dumps(self.rows("trip_covers"), ensure_ascii=False)
-        self.assertNotIn("Москва", metadata)
+        # Only the explicitly public subject/location labels are persisted;
+        # the raw prompt, request and private wishes are never copied.
+        self.assertEqual(self.rows("trip_covers")[0]["subject_location"], prompt.subject_location)
+        self.assertNotIn("provider_prompt", metadata)
+        self.assertNotIn("user_prompt", metadata)
         self.assertNotIn("private", metadata)
         self.assertNotIn("synthetic-art-key", metadata)
 
