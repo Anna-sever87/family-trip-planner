@@ -83,11 +83,10 @@ class CoverPromptTests(unittest.TestCase):
                               ("Санкт-Петербург", "Россия")):
             with self.subTest(city=city):
                 prompt = self.build(city, country)
-                for text in ("Яркая детальная туристическая ИИ-обложка", "чёткий передний и дальний план"):
-                    self.assertIn(text, prompt.provider_prompt)
+                self.assertIn("ИИ-обложка", prompt.provider_prompt)
                 self.assertNotIn("синий/белый", prompt.provider_prompt)
                 self.assertLessEqual(len(prompt.provider_prompt), 500)
-                self.assertEqual(prompt.version, "destination-cover-v10")
+                self.assertEqual(prompt.version, "destination-cover-v12")
 
     def test_full_provider_prompt_keeps_whole_subject_or_coherent_shore_at_ground_level(self):
         for city, country in (("Москва", "Россия"), ("Сочи", "Россия"),
@@ -103,7 +102,7 @@ class CoverPromptTests(unittest.TestCase):
                     self.assertNotIn("крыша", prompt.provider_prompt)
                 else:
                     for text in ("Общий внешний план с земли издалека", "Объект целиком в центре",
-                                 "полный контур", "крыша у здания", "основание без обрезки"):
+                                 "полный контур", "крыша у здания", "основание без обрезки", "до 60% ширины кадра"):
                         self.assertIn(text, prompt.provider_prompt)
                 self.assertNotIn("целиком и крупно", prompt.provider_prompt)
                 self.assertNotIn("перед главным фасадом", prompt.provider_prompt)
@@ -216,7 +215,7 @@ class CoverPromptTests(unittest.TestCase):
                       prompt.provider_prompt)
         self.assertIn("Общий внешний план с земли издалека", prompt.provider_prompt)
         self.assertIn('["Новосибирск","Россия"]', prompt.provider_prompt)
-        self.assertEqual(prompt.version, "destination-cover-v10")
+        self.assertEqual(prompt.version, "destination-cover-v12")
         self.assertLessEqual(len(prompt.provider_prompt), 500)
         self.assertNotIn("колонн", prompt.provider_prompt)
         self.assertNotIn("купол", prompt.provider_prompt)

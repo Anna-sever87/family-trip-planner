@@ -620,7 +620,12 @@ def dispatch_reminders(
         sent_to_telegram = False
 
         try:
-            reminder_trip = trip
+            # The due-list snapshot may predate a completed day swap. Read the
+            # owner-bound current plan only AFTER claiming: the sending lease
+            # now prevents a concurrent swap/delete from changing this plan.
+            reminder_trip = db.get_trip(trip_id, int(trip["tg_id"]))
+            if reminder_trip is None:
+                raise ValueError("Поездка для напоминания больше недоступна.")
             fresh_weather_available = True
 
             if kind in (
@@ -631,7 +636,7 @@ def dispatch_reminders(
                     reminder_trip,
                     fresh_weather_available,
                 ) = _trip_with_fresh_eve_weather(
-                    trip
+                    reminder_trip
                 )
 
             text = (

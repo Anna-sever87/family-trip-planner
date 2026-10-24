@@ -111,6 +111,16 @@ def _regional_grounding_diagnostics(grounding, *, blocked_count=0) -> dict:
     def count(value):
         return min(value, 100_000) if type(value) is int and value >= 0 else 0
 
+    from candidate_grounding import PROPOSAL_ISSUE_CODES, LOOKUP_ISSUE_CODES
+
+    def safe_issue_counts(raw, allowed):
+        result = {}
+        for key, value in (raw.items() if isinstance(raw, dict) else ()):
+            name = key if isinstance(key, str) and key in allowed else "other"
+            if count(value):
+                result[name] = min(100_000, result.get(name, 0) + count(value))
+        return result
+
     reasons, kinds, problems = {}, {}, {}
     for rejection in grounding.rejected:
         reason = rejection.get("reason") if isinstance(rejection, dict) else None
@@ -127,6 +137,8 @@ def _regional_grounding_diagnostics(grounding, *, blocked_count=0) -> dict:
         "blocked_poi_count": count(blocked_count), "rejected_count": len(grounding.rejected),
         "rejection_reasons": reasons, "rejection_kinds": kinds,
         "problem_count": len(grounding.problems), "problem_codes": problems,
+        "proposal_issue_counts": safe_issue_counts(getattr(grounding, "proposal_issue_counts", None), PROPOSAL_ISSUE_CODES),
+        "lookup_issue_counts": safe_issue_counts(getattr(grounding, "lookup_issue_counts", None), LOOKUP_ISSUE_CODES),
         "incomplete": grounding.incomplete is True,
         "completion_calls": count(grounding.completion_calls),
         "verification_queries": count(grounding.verification_queries),

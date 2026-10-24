@@ -44,6 +44,19 @@ class RegionGroundingDiagnosticTests(unittest.TestCase):
         self.assertEqual((data["completion_calls"], data["geocode_calls"], data["verification_queries"], data["blocked_poi_count"]), (0, 0, 0, 0))
         self.assertEqual(data["cache_only_checks"], 100_000)
 
+    def test_proposal_and_lookup_subreasons_are_finite_bounded_counts_only(self):
+        result = GroundingResult(
+            proposal_issue_counts={"title_query_mismatch": 14, "country_mismatch": True,
+                                   "private model text": 2, "missing_locality": -1},
+            lookup_issue_counts={"base_mismatch": 1, "poi_not_found": 10**9, "private response": "secret"})
+        before = deepcopy(result)
+        data = planner._regional_grounding_diagnostics(result)
+        self.assertEqual(data["proposal_issue_counts"], {"title_query_mismatch": 14, "other": 2})
+        self.assertEqual(data["lookup_issue_counts"], {"base_mismatch": 1, "poi_not_found": 100_000})
+        self.assertNotIn("private", json.dumps(data))
+        self.assertNotIn("secret", json.dumps(data))
+        self.assertEqual(result, before)
+
     def run_pre_map_failure(self, response):
         fixture = fixtures.GroundedPlannerTests()
         with ExitStack() as stack:

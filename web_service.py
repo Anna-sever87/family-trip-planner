@@ -8,7 +8,7 @@ import math
 import os
 import unicodedata
 from copy import deepcopy
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Any, Dict, List, Optional
 
 from pydantic import ValidationError
@@ -74,6 +74,166 @@ class TripDataError(ValueError):
 
 class CountryCorrectionError(ValueError):
     """A country-only correction could not be proved without changing place."""
+
+
+class DaySwapError(ValueError):
+    """A local calendar permutation was rejected; the stored trip is unchanged."""
+
+
+def _day_swap_context(trip: dict):
+    """Only persisted map evidence; never perform legacy recovery or networking."""
+    try:
+        request = TripRequest.model_validate(trip["request"])
+        itinerary = Itinerary.model_validate(trip["itinerary"])
+        if request.destination_kind == "region" or itinerary.source_schedule:
+            raise DaySwapError(
+                "Автоматическая перестановка регионального маршрута пока недоступна: "
+                "нужно пересчитать переезды и смену жилья. Программа сохранена без изменений.")
+        if request.days_count < 2:
+            raise DaySwapError("В поездке один день: для перестановки нужны два разных дня.")
+        if not itinerary.city_schedule:
+            raise DaySwapError("Для этой поездки не сохранён проверенный городской набор мест. "
+                               "Без него безопасная перестановка недоступна. Программа не изменена.")
+        raw_days = trip["itinerary"]["days"]
+        if (not 2 <= request.days_count <= MAX_TRIP_DAYS or len(raw_days) != request.days_count
+                or any(type(day.get("day")) is not int or day["day"] != index + 1
+                       or day.get("date") != (date.fromisoformat(request.start_date) + timedelta(days=index)).isoformat()
+                       for index, day in enumerate(raw_days))):
+            raise ValueError("invalid calendar")
+        candidates, center = city_context.load_city_context(trip["request"][city_context.CONTEXT_KEY], request)
+        city_context.check_context_places(itinerary, candidates)
+        city_context.city_presentation_tips(trip["request"][city_context.CONTEXT_KEY], itinerary, candidates, request)
+        if _city_schedule_metadata_problems(itinerary, request):
+            raise ValueError("invalid metadata")
+        return request, itinerary, candidates, center
+    except DaySwapError:
+        raise
+    except (ValueError, TypeError, KeyError, AttributeError, OverflowError, RecursionError) as error:
+        raise DaySwapError("Сохранённые даты или данные карты не позволяют безопасно переставить дни. "
+                           "Программа сохранена без изменений.") from error
+
+
+def _day_swap_capability(trip: dict) -> dict:
+    try:
+        _day_swap_context(trip)
+    except DaySwapError as error:
+        return {"day_swap_available": False, "day_swap_unavailable_reason": str(error)}
+    return {"day_swap_available": True, "day_swap_unavailable_reason": ""}
+
+
+def _swapped_city_plan(trip: dict, day_a: int, day_b: int) -> tuple[dict, Optional[dict]]:
+    """Move complete day programmes, but pin their calendar slots and all evidence."""
+    from city_quality import check_city_quality
+    from city_evidence import replace_city_managed_tips
+    from city_visit_estimates import check_city_visit_estimates
+    from city_visit_options import check_city_visit_conditions
+    from places import verify_itinerary
+    from rules import check_city_radius, check_program_depth, check_rules, check_verified_place_duplicates
+    from weather import RAIN_MM
+
+    request, original, candidates, center = _day_swap_context(trip)
+    if (type(day_a) is not int or type(day_b) is not int or day_a == day_b
+            or not 1 <= day_a <= request.days_count or not 1 <= day_b <= request.days_count):
+        raise DaySwapError("Выберите два разных дня, которые есть в этой поездке.")
+    result = deepcopy(trip["itinerary"])
+    days = result["days"]
+    slots = [(days[index]["day"], days[index]["date"]) for index in (day_a - 1, day_b - 1)]
+    days[day_a - 1], days[day_b - 1] = days[day_b - 1], days[day_a - 1]
+    for index, (number, day_date) in zip((day_a - 1, day_b - 1), slots):
+        days[index]["day"], days[index]["date"] = number, day_date
+    try:
+        itinerary = Itinerary.model_validate(result)
+        city_context.check_context_places(itinerary, candidates)
+        conditions = check_city_visit_conditions(itinerary, candidates, request)
+        if conditions:
+            raise DaySwapError("На новой дате или в выбранное время не подтверждаются условия посещения. "
+                               "Выберите другую пару дней. Программа сохранена без изменений.")
+        weather = trip["request"].get("weather")
+        rainy_dates = []
+        if isinstance(weather, dict) and weather.get("source") in {"forecast", "fact"}:
+            observations = weather.get("days", [])
+            if not isinstance(observations, list) or len(observations) > MAX_TRIP_DAYS:
+                raise ValueError("invalid saved weather")
+            for observation in observations:
+                amount, when = observation["rain_mm"], observation["date"]
+                if (type(amount) not in (int, float) or not math.isfinite(amount) or amount < 0
+                        or not isinstance(when, str) or date.fromisoformat(when).isoformat() != when):
+                    raise ValueError("invalid saved weather")
+                if amount >= RAIN_MM:
+                    rainy_dates.append(when)
+        records = {candidate.place_query: candidate.record for candidate in candidates}
+        problems = check_rules(itinerary, request, rainy_dates, allow_city_limited_program=True)
+        problems += check_program_depth(itinerary, request, allow_city_limited_program=True)
+        problems += check_city_radius(itinerary, (center["lat"], center["lon"]))
+        problems += check_verified_place_duplicates(itinerary, verified_records=records)
+        problems += check_city_quality(itinerary, request, records, allow_city_limited_program=True)
+        problems += check_city_visit_estimates(itinerary, candidates)
+        # The verifier may refresh display fields in its argument. Validate a
+        # throwaway copy: a swap never rewrites source identities or old prices.
+        problems += verify_itinerary(itinerary.model_copy(deep=True), verified_records=records)
+        if problems:
+            raise DaySwapError("Перестановка не проходит проверку расписания, погодных ограничений или маршрута. "
+                               "Выберите другую пару дней. Программа сохранена без изменений.")
+        # Dated source-window text belongs to the visit, not its former slot.
+        # Replace only strings proved server-owned by the existing manifest
+        # (or exact legacy rendering); every unowned tip remains verbatim.
+        context = trip["request"][city_context.CONTEXT_KEY]
+        managed = city_context.city_presentation_tips(context, original, candidates, request)
+        updated_request = None
+        if managed:
+            result["tips"] = replace_city_managed_tips(original, itinerary, managed, candidates, request)
+            presented = Itinerary.model_validate(result)
+            new_context = city_context.attach_city_presentation(context, presented, candidates, request)
+            city_context.validate_city_edit_context(context, new_context, request, presented)
+            if new_context != context:
+                updated_request = deepcopy(trip["request"])
+                updated_request[city_context.CONTEXT_KEY] = new_context
+        json.dumps(result, ensure_ascii=False, allow_nan=False)
+        return result, updated_request
+    except DaySwapError:
+        raise
+    except (ValueError, TypeError, KeyError, AttributeError, OverflowError, RecursionError) as error:
+        raise DaySwapError("Не удалось проверить перестановку по сохранённым данным. Программа не изменена.") from error
+
+
+@access_guard.guard_user_operation
+def swap_trip_days(tg_id: int, trip_id: int, day_a: int, day_b: int, expected_revision: int, *,
+                   expected_account_key: str) -> dict:
+    """One owner/account/revision CAS; no AI, quota, memory, covers or file changes."""
+    if (type(tg_id) is not int or tg_id <= 0 or type(trip_id) is not int or trip_id < 1
+            or type(expected_revision) is not int or expected_revision < 1
+            or not isinstance(expected_account_key, str) or not expected_account_key):
+        raise TripNotFoundError("Поездка не найдена.")
+    with db.connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        owner = conn.execute("SELECT 1 FROM users WHERE tg_id=? AND account_key=? AND deletion_token=''",
+                             (tg_id, expected_account_key)).fetchone()
+        row = conn.execute("SELECT * FROM trips WHERE id=? AND tg_id=?", (trip_id, tg_id)).fetchone()
+        if owner is None or row is None:
+            raise TripNotFoundError("Поездка не найдена.")
+        if int(row["revision"]) != expected_revision:
+            raise EditConflictError("Поездка уже изменена. Обновите страницу перед перестановкой дней.")
+        import trip_deletion
+        if trip_deletion._busy(conn, tg_id, expected_account_key, trip_id):
+            raise EditBusyError("Другая операция с поездкой ещё выполняется. Дождитесь её окончания.")
+        try:
+            saved = {"request": json.loads(row["request_json"]), "itinerary": json.loads(row["itinerary_json"])}
+        except (ValueError, TypeError) as error:
+            raise DaySwapError("Сохранённые данные поездки повреждены. Программа не изменена.") from error
+        swapped, updated_request = _swapped_city_plan(saved, day_a, day_b)
+        request_json = (json.dumps(updated_request, ensure_ascii=False, allow_nan=False)
+                        if updated_request is not None else row["request_json"])
+        changed = conn.execute(
+            "UPDATE trips SET itinerary_json=?,request_json=?,revision=revision+1 WHERE id=? AND tg_id=? AND revision=?",
+            (json.dumps(swapped, ensure_ascii=False, allow_nan=False), request_json, trip_id, tg_id, expected_revision),
+        ).rowcount
+        if changed != 1:
+            raise EditConflictError("Поездка уже изменена. Обновите страницу.")
+    # Web and bot PDFs are rebuilt from the current row on each download.
+    # No persistent PDF cache is read; do not remove a user's exported files.
+    return {"id": trip_id, "revision": expected_revision + 1, "changed": True,
+            "day_a": day_a, "day_b": day_b,
+            "message": "Программы дней поменяны местами. Даты поездки сохранены; попытка генерации не потрачена."}
 
 
 def _country_label(country: str) -> str:
@@ -764,6 +924,7 @@ def get_trip_detail(tg_id: int, trip_id: int) -> Dict[str, Any]:
         "revision": int(trip.get("revision", 1)),
         "request": request.model_dump(),
         "country_correction_available": _country_correction_available(trip),
+        **_day_swap_capability(trip),
         "edit_available": True,
         "edit_unavailable_reason": "",
         "edit_scope_note": city_context.CITY_EDIT_NOTE if itinerary.city_schedule else "",

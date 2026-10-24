@@ -162,6 +162,13 @@ class CountryCorrectionRequest(BaseModel):
     expected_revision: int = Field(ge=1, strict=True)
 
 
+class DaySwapRequest(BaseModel):
+    model_config = {"extra": "forbid"}
+    day_a: int = Field(ge=1, le=14, strict=True)
+    day_b: int = Field(ge=1, le=14, strict=True)
+    expected_revision: int = Field(ge=1, strict=True)
+
+
 class TripCreateRequest(BaseModel):
     destination: str = Field(min_length=2, max_length=100)
     country: str | None = Field(default=None, min_length=1, max_length=80)
@@ -531,6 +538,21 @@ def correct_trip_country(trip_id: int, payload: CountryCorrectionRequest, http_r
     except (web_service.EditBusyError, web_service.EditConflictError) as error:
         raise HTTPException(status_code=409, detail=str(error)) from error
     except web_service.CountryCorrectionError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+
+
+@app.patch("/api/trips/{trip_id}/days/swap")
+def swap_trip_days(trip_id: int, payload: DaySwapRequest, http_request: Request,
+                   tg_id: int = Depends(require_csrf)) -> dict:
+    try:
+        return web_service.swap_trip_days(
+            tg_id, trip_id, payload.day_a, payload.day_b, payload.expected_revision,
+            expected_account_key=http_request.state.account_key,
+            **({"_access_grant": http_request.state.access_grant} if access_control.enabled() else {}),
+        )
+    except (web_service.EditBusyError, web_service.EditConflictError) as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    except web_service.DaySwapError as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
 
 

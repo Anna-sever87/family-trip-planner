@@ -5,6 +5,7 @@ details or the pixels that an image model will return. No discovery/API calls.
 """
 
 import json
+import re
 
 import city_context
 from cover_prompts import CoverSubject, SUBJECT_KINDS, safe_subject_title
@@ -69,9 +70,19 @@ def select_saved_cover_subject(request_json, itinerary_json, *, destination, cou
                 title = safe_subject_title(candidate.title)
             except ValueError:
                 continue
+            # Only an exact alias from this already checked map record may
+            # explain a foreign name in the image prompt and frozen caption.
+            russian_title = ""
+            details = candidate.record.get("namedetails", {})
+            alias = details.get("name:ru") if isinstance(details, dict) else None
+            if isinstance(alias, str) and re.search(r"[А-Яа-яЁё]", alias):
+                try:
+                    russian_title = safe_subject_title(alias)
+                except ValueError:
+                    pass
             eligible.append((_PRIORITY[kind], title.casefold(), candidate.candidate_id,
                              CoverSubject(title, kind, candidate.candidate_id, destination, country,
-                                          locality, local_country, country_code.lower())))
+                                          locality, local_country, country_code.lower(), russian_title)))
         return min(eligible, key=lambda entry: entry[:3])[3] if eligible else None
     except (ValueError, TypeError, KeyError, AttributeError, OverflowError, RecursionError):
         return None

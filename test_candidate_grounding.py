@@ -102,12 +102,12 @@ class CandidateGroundingTests(unittest.TestCase):
             self.assertEqual(schema["properties"]["pois"]["minItems"], min(18, 2 * days))
             bases_schema = schema["properties"]["bases"]
             self.assertEqual((bases_schema["type"], bases_schema["minItems"], bases_schema["maxItems"]), ("array", 1, 3))
-            self.assertEqual(bases_schema["items"]["required"], ["base_key", "base_query"])
+            self.assertEqual(bases_schema["items"]["required"], ["base_key", "base_name"])
             self.assertFalse(bases_schema["items"]["additionalProperties"])
             self.assertEqual(bases_schema["items"]["properties"]["base_key"]["enum"], list(grounding.BASE_KEYS))
-            self.assertEqual(bases_schema["items"]["properties"]["base_query"]["maxLength"], 120)
+            self.assertEqual(bases_schema["items"]["properties"]["base_name"]["maxLength"], 80)
             self.assertEqual(schema["properties"]["pois"]["items"]["properties"]["title"]["maxLength"], 80)
-            self.assertEqual(schema["properties"]["pois"]["items"]["properties"]["place_query"]["maxLength"], 140)
+            self.assertNotIn("place_query", schema["properties"]["pois"]["items"]["properties"])
 
     def test_injected_completion_is_used_once_with_compact_context(self):
         with patch.object(grounding, "generate_json", side_effect=AssertionError("default AI must not run")), patch.object(places, "geocode") as lookup:

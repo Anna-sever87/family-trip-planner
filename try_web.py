@@ -578,8 +578,8 @@ def main() -> None:
             assert 'id="tripResultsStatus" class="visually-hidden" aria-live="polite"' in page.text
             assert page.text.count('aria-pressed="false"') >= 2
             assert 'aria-pressed="true"' in page.text
-            assert "/static/styles.css?v=20261024-cover-framing" in page.text
-            assert "/static/app.js?v=20261024-cover-framing" in page.text
+            assert "/static/styles.css?v=20261024-day-order-quality" in page.text
+            assert "/static/app.js?v=20261024-day-order-quality" in page.text
             assert 'class="hero travel-hero"' in page.text
             assert "ИИ-иллюстрация путешествия" in page.text
             assert page.text.count("/static/favicon.svg?v=20261022-premium-travel") == 3

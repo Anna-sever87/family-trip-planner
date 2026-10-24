@@ -1050,6 +1050,104 @@ function tripEditUnavailableReason() {
     || "Редактирование этого городского маршрута пока недоступно. Маршрут сохранён без изменений.";
 }
 
+function appendDaySwapControl(copy, actions) {
+  const snapshot = state.trip, account = state.me, viewRevision = state.viewRevision;
+  const days = snapshot.itinerary.days;
+  const validDays = days.length >= 2 && days.length <= 14
+    && days.every((day) => Number.isSafeInteger(day.day) && day.day >= 1 && day.day <= 14)
+    && new Set(days.map((day) => day.day)).size === days.length;
+  const available = snapshot.day_swap_available === true && validDays
+    && Number.isSafeInteger(snapshot.revision) && snapshot.revision >= 1;
+  const current = () => state.me === account && state.trip === snapshot
+    && state.viewRevision === viewRevision && !state.deletedTrips.has(Number(snapshot.id))
+    && !state.deletingTrips.has(Number(snapshot.id));
+  const form = node("form", "day-swap-form");
+  form.hidden = true;
+  const open = button("Поменять дни местами", "button button-ghost day-swap-toggle", () => {
+    if (!current() || !available) return;
+    form.hidden = !form.hidden;
+    open.setAttribute("aria-expanded", String(!form.hidden));
+    if (!form.hidden) first.focus();
+  });
+  open.setAttribute("aria-expanded", "false");
+  open.disabled = !available;
+  actions.append(open);
+  if (!available) {
+    const reason = snapshot.day_swap_unavailable_reason
+      || "Для этой поездки перестановка дней недоступна.";
+    open.title = reason;
+    // Older server versions need not expose a misleading new restriction.
+    if (snapshot.day_swap_available === false) copy.append(node("p", "trip-header-meta", reason));
+    return;
+  }
+  const choices = node("div", "day-swap-choices");
+  function selector(labelText) {
+    const label = node("label", "form-field", labelText);
+    const select = node("select");
+    select.required = true;
+    select.setAttribute("aria-label", labelText);
+    for (const day of days) {
+      const option = node("option", "", `День ${day.day} — ${formatDate(day.date, false)}${day.theme ? ` · ${String(day.theme).slice(0, 100)}` : ""}`);
+      option.value = String(day.day);
+      select.append(option);
+    }
+    label.append(select); choices.append(label);
+    return select;
+  }
+  const first = selector("Первый день для обмена"), second = selector("Второй день для обмена");
+  first.value = String(days.some((day) => day.day === state.selectedDay) ? state.selectedDay : days[0].day);
+  second.value = String(days.find((day) => String(day.day) !== first.value).day);
+  const save = node("button", "button button-primary", "Обменять программы дней");
+  save.type = "submit";
+  const message = node("p", "trip-header-meta", "Выберите два дня: их программы обменяются местами, даты поездки сохранятся. Новая ИИ-генерация не запускается, попытка не расходуется. Проверим совместимость с сохранёнными условиями посещения; актуальные часы работы уточняйте у самих мест.");
+  message.setAttribute("role", "status");
+  form.append(choices, save, message); copy.append(form);
+  let pending = false;
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    if (pending || save.disabled || !current() || state.editingTrip) return;
+    const dayA = Number(first.value), dayB = Number(second.value);
+    if (!Number.isSafeInteger(dayA) || !Number.isSafeInteger(dayB) || dayA === dayB
+        || !days.some((day) => day.day === dayA) || !days.some((day) => day.day === dayB)) {
+      message.textContent = "Выберите два разных дня этой поездки.";
+      second.focus(); return;
+    }
+    pending = true; first.disabled = second.disabled = save.disabled = true;
+    message.textContent = "Проверяю и сохраняю новый порядок дней…";
+    let changed = false, uncertain = false;
+    try {
+      const result = await api(`/api/trips/${snapshot.id}/days/swap`, { method: "PATCH",
+        body: JSON.stringify({ day_a: dayA, day_b: dayB, expected_revision: snapshot.revision }) });
+      if (!result || result.id !== snapshot.id || result.changed !== true
+          || !Number.isSafeInteger(result.revision) || result.revision <= snapshot.revision
+          || result.day_a !== dayA || result.day_b !== dayB) throw new Error("Unconfirmed day swap");
+      changed = true;
+      if (!current()) return;
+      const updated = await api(`/api/trips/${snapshot.id}`);
+      if (!updated || updated.id !== snapshot.id || !Number.isSafeInteger(updated.revision)
+          || updated.revision < result.revision || !Array.isArray(updated.itinerary?.days)) {
+        throw new Error("Unconfirmed updated trip");
+      }
+      if (current()) {
+        state.trip = updated;
+        if (!updated.itinerary.days.some((day) => day.day === state.selectedDay)) state.selectedDay = updated.itinerary.days[0]?.day || 1;
+        renderTrip();
+        toast(`Программы дней ${dayA} и ${dayB} поменялись местами. PDF тоже обновлён.`);
+      }
+      if (state.me === account) await refreshTripSummary(account);
+    } catch (error) {
+      uncertain = !error.status || error.status === 409 || error.status >= 500;
+      if (current()) message.textContent = changed
+        ? "Порядок сохранён, но экран не обновился. Обновите страницу; повторно обменивать дни не нужно."
+        : uncertain ? `${error.status === 409 ? `${error.message} ` : ""}Обновите страницу, чтобы проверить результат, перед повторной перестановкой.`
+          : error.message;
+    } finally {
+      pending = false;
+      first.disabled = second.disabled = save.disabled = changed || uncertain;
+    }
+  });
+}
+
 function renderTripHeader() {
   const hero = $("tripHero");
   hero.replaceChildren(createTripCover(state.trip, true, cachedCover(state.trip.id)?.value));
@@ -1152,6 +1250,7 @@ function renderTripHeader() {
     actions.append(open);
     copy.append(form);
   }
+  appendDaySwapControl(copy, actions);
   header.append(copy, actions);
 }
 

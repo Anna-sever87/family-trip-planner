@@ -52,6 +52,8 @@ def region_margin_km(scope: RegionScope) -> float:
 
 def resolve_region(destination: str) -> RegionScope:
     """Берёт рамку именно территории, а не одноимённого посёлка."""
+    parts = [part.strip() for part in destination.split(",") if part.strip()]
+    country = parts[-1] if len(parts) > 1 else ""
     try:
         record = places.geocode(destination, include_geometry=True)
         if not record:
@@ -66,14 +68,28 @@ def resolve_region(destination: str) -> RegionScope:
             or not _valid_geometry(record.get("geojson"))
         ):
             raise ValueError("not a territory")
+        if not country:
+            # An omitted country must come from the same verified map record,
+            # never from model text or a default. Unknown/conflicting labels
+            # require explicit user context instead of guessing a country.
+            address = record.get("address") if isinstance(record.get("address"), dict) else {}
+            mapped_country, mapped_code = address.get("country"), address.get("country_code")
+            displayed_country = str(record.get("name") or "").rsplit(",", 1)[-1].strip()
+            if (not isinstance(mapped_country, str) or not 1 <= len(mapped_country) <= 80
+                    or mapped_country != mapped_country.strip() or not mapped_country.isprintable()
+                    or "," in mapped_country or not isinstance(mapped_code, str)
+                    or len(mapped_code) != 2 or not mapped_code.isascii() or not mapped_code.isalpha()
+                    or places._country_identity(mapped_country) != (mapped_code.lower(),)
+                    or places._country_identity(displayed_country) != (mapped_code.lower(),)):
+                raise ValueError("unconfirmed region country")
+            country = mapped_country
     except (places.GeocodeUnavailable, places.GeocodeMismatch, ValueError, TypeError, KeyError) as error:
         raise DestinationScopeError(
             f"Не удалось определить территорию «{destination}» на карте. "
             "Уточните её название и страну, например «озеро Байкал, Россия», "
             "или выберите более конкретную зону отдыха."
         ) from error
-    parts = [part.strip() for part in destination.split(",") if part.strip()]
-    return RegionScope(str(record["name"]), parts[-1] if len(parts) > 1 else "", bounds,
+    return RegionScope(str(record["name"]), country, bounds,
                        record["geojson"], area_type=record["type"])
 
 

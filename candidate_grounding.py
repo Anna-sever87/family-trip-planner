@@ -70,6 +70,34 @@ class _Batch(BaseModel):
     pois: list[_PoiProposal] = Field(max_length=18)
 
 
+_NAME_PATTERN = r"^[^,\s](?:[^,\r\n]*[^,\s])?$"
+
+
+class _WireBaseProposal(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    base_key: Literal["base_1", "base_2", "base_3"]
+    base_name: str = Field(min_length=1, max_length=80, pattern=_NAME_PATTERN)
+
+
+class _WirePoiProposal(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    title: str = Field(min_length=1, max_length=80, pattern=_NAME_PATTERN)
+    locality: str = Field(min_length=1, max_length=120, pattern=_NAME_PATTERN)
+    base_key: Literal["base_1", "base_2", "base_3"]
+
+
+class _WireBatch(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    bases: list[_WireBaseProposal] = Field(min_length=1, max_length=3)
+    pois: list[_WirePoiProposal] = Field(max_length=18)
+
+
+PROPOSAL_ISSUE_CODES = frozenset({"outer_whitespace", "not_printable", "empty_component",
+                                "country_mismatch", "missing_locality", "title_query_mismatch"})
+LOOKUP_ISSUE_CODES = frozenset({"base_mismatch", "base_not_found", "base_other",
+                              "poi_mismatch", "poi_not_found", "poi_other"})
+
+
 @dataclass
 class GroundingResult:
     confirmed_hints: list[dict[str, Any]] = field(default_factory=list)
@@ -86,6 +114,8 @@ class GroundingResult:
     cache_only_added: int = 0
     source_roster_used: bool = False
     source_clusters_omitted: list[str] = field(default_factory=list)
+    proposal_issue_counts: dict[str, int] = field(default_factory=dict)
+    lookup_issue_counts: dict[str, int] = field(default_factory=dict)
     # Резерв — верхняя граница, а НЕ число реально отправленных HTTP-запросов.
     reserved_http_attempts_upper_bound: int = 0
     http_attempt_limit: int = MAX_HTTP_ATTEMPTS
@@ -152,9 +182,9 @@ def build_candidate_schema(request: TripRequest) -> dict[str, Any]:
         "type": "object", "additionalProperties": False,
         "properties": {
             "base_key": {"type": "string", "enum": list(BASE_KEYS)},
-            "base_query": {"type": "string", "minLength": 3, "maxLength": 120},
+            "base_name": {"type": "string", "minLength": 1, "maxLength": 80},
         },
-        "required": ["base_key", "base_query"],
+        "required": ["base_key", "base_name"],
     }
     return {
         "type": "object", "additionalProperties": False,
@@ -169,16 +199,69 @@ def build_candidate_schema(request: TripRequest) -> dict[str, Any]:
                     "type": "object", "additionalProperties": False,
                     "properties": {
                         "title": {"type": "string", "minLength": 1, "maxLength": 80},
-                        "place_query": {"type": "string", "minLength": 3, "maxLength": 140},
                         "locality": {"type": "string", "minLength": 1, "maxLength": 120},
                         "base_key": {"type": "string", "enum": list(BASE_KEYS)},
                     },
-                    "required": ["title", "place_query", "locality", "base_key"],
+                    "required": ["title", "locality", "base_key"],
                 },
             },
         },
         "required": ["bases", "pois"],
     }
+
+
+def _materialize_candidate_batch(payload: Any, scope: RegionScope) -> _Batch:
+    """Join names once on the server, never repair contradictory legacy queries.
+
+    The model chooses names, not the country or repeated copies of a title.
+    Legacy complete batches keep their strict old validation path; mixed wire
+    formats and extra address/country fields are rejected rather than ignored.
+    Neither format supplies map identity, coordinates or visit facts.
+    """
+    if (isinstance(payload, dict) and isinstance(payload.get("bases"), list)
+            and any(isinstance(base, dict) and "base_query" in base for base in payload["bases"])):
+        return _Batch.model_validate(payload)
+    wire = _WireBatch.model_validate(payload)
+    country = scope.country
+    region = scope.name.split(",", 1)[0].strip()
+    if (not isinstance(country, str) or not country or country != country.strip()
+            or not country.isprintable() or "," in country or not region or not region.isprintable()):
+        raise ValueError("A bound region and country are required")
+    names = [base.base_name for base in wire.bases] + [name for poi in wire.pois for name in (poi.title, poi.locality)]
+    if any(not name.isprintable() or "," in name for name in names):
+        raise ValueError("Only individual printable names are accepted")
+    # A lake/park is a geographic boundary, not a locality's postal province.
+    # Do not invent that qualifier. Country/name/type and the original full
+    # polygon still constrain every base in the normal grounding pipeline.
+    base_context = f"{region}, {country}" if scope.area_type in {"administrative", "state", "region", "county"} else country
+    return _Batch.model_validate({
+        "bases": [{"base_key": base.base_key, "base_query": f"{base.base_name}, {base_context}"}
+                  for base in wire.bases],
+        "pois": [{"title": poi.title, "place_query": f"{poi.title}, {poi.locality}, {country}",
+                  "locality": poi.locality, "base_key": poi.base_key} for poi in wire.pois],
+    })
+
+
+def _proposal_context_issue(proposal: _PoiProposal, country: str) -> str:
+    query = proposal.place_query
+    if query != query.strip():
+        return "outer_whitespace"
+    if not query.isprintable():
+        return "not_printable"
+    parts = [part.strip() for part in query.split(",")]
+    if not all(parts):
+        return "empty_component"
+    if country and places._country_identity(parts[-1]) != places._country_identity(country):
+        return "country_mismatch"
+    if len(parts) < 3:
+        return "missing_locality"
+    return "title_query_mismatch" if parts[0] != proposal.title else ""
+
+
+def _record_lookup_issue(result: GroundingResult, stage: str, error: places.GeocodeIncomplete) -> None:
+    reason = error.reason if isinstance(error.reason, str) and error.reason in {"mismatch", "not_found"} else "other"
+    key = stage + "_" + reason
+    result.lookup_issue_counts[key] = result.lookup_issue_counts.get(key, 0) + 1
 
 
 def _unique_object(pairs):
@@ -609,7 +692,8 @@ def _lookup(query: str, result: GroundingResult) -> tuple[dict[str, Any] | None,
                 _base_has_address_context(place) and _is_local_base(place)
             )) if enrich_base else places.geocode(query, max_variants=1)
         )
-    except places.GeocodeIncomplete:
+    except places.GeocodeIncomplete as error:
+        _record_lookup_issue(result, "base", error)
         return None, "limited_search_incomplete"
     except places.GeocodeUnavailable:
         return None, "map_unavailable"
@@ -653,7 +737,8 @@ def _lookup_nearby_poi(
     result.geocode_calls += 1
     try:
         record = places.geocode_nearby_named(title, country, base["lat"], base["lon"], REGION_BASE_RADIUS_KM, **options)
-    except places.GeocodeIncomplete:
+    except places.GeocodeIncomplete as error:
+        _record_lookup_issue(result, "poi", error)
         return None, "limited_search_incomplete"
     except places.GeocodeUnavailable:
         return None, "map_unavailable"
@@ -740,13 +825,15 @@ def ground_region_candidates(
         "не доказательство существования дороги или фактического времени пути. "
         "Не сочетай разные берега или далёкие части региона. Не рассчитывай на межбереговые паромы "
         "и сезонные лодки: их доступность здесь не проверена. "
-        "base_query — точное название базы, её собственная область/страна. "
+        "base_name — только точное название локальной базы, без запятых, области и страны. "
+        "Программа сама добавит уже проверенную страну и, для административной территории, её каноническое название. "
         "bases — массив объектов с уникальными base_key; base_1 обязателен, base_2 и base_3 добавляй только при необходимости. "
         "Подготовь от min_pois до max_pois разнообразных реальных уникальных POI для этих баз: "
         "примерно 2 разных места на день плюс резерв замен. Это предложения для проверки, "
         "а не подтверждённая готовая программа; не выдумывай названия ради количества. "
-        "place_query: точное название, СОБСТВЕННЫЙ ближайший населённый пункт/местность, страна; "
-        "locality дословно повторяет предпоследнюю часть place_query. title повторяет его название. "
+        "title — только точное название POI; locality — только его СОБСТВЕННЫЙ ближайший населённый пункт/местность. "
+        "В каждом из этих полей одно название без запятых, добавленной области и страны, без внешних пробелов. "
+        "Не пиши place_query: программа сама соберёт его из title, locality и уже проверенной страны. "
         "Не заменяй locality названием всей территории, выбранной базы или соседнего крупного города. "
         "base_key ссылается на одну из предложенных баз; не требуй дальних переходов между ними каждый день. "
         "Не выдумывай координаты, источники, цены, расписания, длительности или доказательства доступности. "
@@ -772,7 +859,7 @@ def ground_region_candidates(
         return result
     result.input_tokens, result.output_tokens = generation.input_tokens, generation.output_tokens
     try:
-        batch = _Batch.model_validate(json.loads(generation.text, object_pairs_hook=_unique_object))
+        batch = _materialize_candidate_batch(json.loads(generation.text, object_pairs_hook=_unique_object), scope)
         proposed_bases = {base.base_key: base for base in batch.bases}
         if BASE_KEYS[0] not in proposed_bases or len(proposed_bases) != len(batch.bases):
             raise ValueError("Нужно от одной до трёх именованных баз")
@@ -857,6 +944,9 @@ def ground_region_candidates(
         key = places._normalized_label(f"{proposal.title}, {parts[-1]}|{base_key}") if valid_context else places._normalized_label(query)
         if not valid_context:
             reason = "invalid_poi_context"
+            issue = _proposal_context_issue(proposal, scope.country)
+            if issue:
+                result.proposal_issue_counts[issue] = result.proposal_issue_counts.get(issue, 0) + 1
         elif is_generic_attraction(proposal.title, query):
             reason = "generic_place"
         elif key in seen:

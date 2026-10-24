@@ -589,6 +589,130 @@ test("late or uncertain country response cannot replace a new view or silently r
   }
 });
 
+function daySwapForm(ui) {
+  const original = detailTrip();
+  ui.state.trip = { ...original, revision: 4, day_swap_available: true,
+    itinerary: { ...original.itinerary, days: [1, 2, 3, 4, 5].map((day) => ({
+      ...original.itinerary.days[0], day, date: `2099-06-0${day}`, theme: `Программа ${day}`,
+    })) } };
+  ui.state.selectedDay = 2;
+  ui.element("tripView").hidden = false;
+  ui.context.renderTripHeader();
+  const [copy, actions] = ui.element("tripHeader").children;
+  const form = copy.children.find((child) => child.className === "day-swap-form");
+  const open = actions.children.find((child) => child.textContent === "Поменять дни местами");
+  return { form, open, first: form.children[0].children[0].children[0],
+    second: form.children[0].children[1].children[0], save: form.children[1], message: form.children[2],
+    submit: () => form.listeners.get("submit")({ preventDefault() {} }) };
+}
+
+test("day swap is explicit, revision-bound, keeps selection and calls no paid endpoint", async () => {
+  const ui = browser(), controls = daySwapForm(ui), calls = [], snapshot = ui.state.trip;
+  assert.equal(controls.form.hidden, true);
+  controls.open.dispatch("click");
+  assert.equal(controls.form.hidden, false);
+  assert.equal(controls.open["aria-expanded"], "true");
+  assert.equal(controls.first.value, "2");
+  controls.first.value = "1"; controls.second.value = "5";
+  ui.context.api = async (url, options) => {
+    calls.push([url, options]);
+    return options ? { id: snapshot.id, changed: true, revision: 5, day_a: 1, day_b: 5 }
+      : { ...snapshot, revision: 5 };
+  };
+  await controls.submit();
+  assert.equal(calls.length, 2);
+  assert.equal(calls[0][0], `/api/trips/${snapshot.id}/days/swap`);
+  assert.equal(calls[0][1].method, "PATCH");
+  assert.deepEqual(JSON.parse(calls[0][1].body), { day_a: 1, day_b: 5, expected_revision: 4 });
+  assert.equal(calls[1][0], `/api/trips/${snapshot.id}`);
+  assert.equal(ui.state.trip.revision, 5);
+  assert.equal(ui.state.selectedDay, 2);
+  assert.equal(ui.summaryRefreshes, 1);
+  assert.match(ui.toasts[0], /1 и 5.*PDF/);
+  assert.equal(controls.save.disabled, true);
+});
+
+test("day swap rejects equal, fractional and missing days before any request", async () => {
+  for (const pair of [["2", "2"], ["1.5", "2"], ["0", "3"], ["1", "14"], ["no", "3"]]) {
+    const ui = browser(), controls = daySwapForm(ui);
+    ui.context.api = () => { throw new Error("API must not be called"); };
+    [controls.first.value, controls.second.value] = pair;
+    await controls.submit();
+    assert.match(controls.message.textContent, /два разных дня/);
+    assert.equal(controls.save.disabled, false);
+  }
+});
+
+test("day swap does not allow double submit or stale navigation/account/deletion writes", async () => {
+  for (const mode of ["navigation", "account", "deleting", "deleted"]) {
+    const ui = browser(), controls = daySwapForm(ui), reply = deferred(), oldTrip = ui.state.trip;
+    let calls = 0;
+    ui.context.api = async () => { calls += 1; return reply.promise; };
+    const pending = controls.submit();
+    await controls.submit();
+    if (mode === "navigation") ui.context.showTrips();
+    if (mode === "account") ui.state.me = { name: "Another account" };
+    if (mode === "deleting") ui.state.deletingTrips.set(oldTrip.id, {});
+    if (mode === "deleted") ui.state.deletedTrips.add(oldTrip.id);
+    reply.resolve({ id: oldTrip.id, changed: true, revision: 5, day_a: 2, day_b: 1 });
+    await pending;
+    assert.equal(calls, 1);
+    assert.deepEqual(ui.renders, []);
+    assert.deepEqual(ui.toasts, []);
+    assert.equal(controls.save.disabled, true);
+  }
+});
+
+test("day swap locks uncertain or stale results and never silently replays PATCH", async () => {
+  for (const mode of ["network", "409", "500", "malformed", "get-failed", "wrong-get", "stale-get"]) {
+    const ui = browser(), controls = daySwapForm(ui), snapshot = ui.state.trip;
+    let calls = 0;
+    ui.context.api = async (_url, options) => {
+      calls += 1;
+      if (mode === "network") throw new Error("Connection lost");
+      if (mode === "409" || mode === "500") throw Object.assign(new Error("Новая версия поездки"), { status: Number(mode) });
+      if (options) return mode === "malformed" ? { id: snapshot.id, changed: true }
+        : { id: snapshot.id, changed: true, revision: 5, day_a: 2, day_b: 1 };
+      if (mode === "get-failed") throw Object.assign(new Error("Failed GET"), { status: 503 });
+      return { ...snapshot, id: mode === "wrong-get" ? 9999 : snapshot.id, revision: mode === "stale-get" ? 4 : 5 };
+    };
+    await controls.submit();
+    const previousCalls = calls;
+    await controls.submit();
+    assert.equal(calls, previousCalls);
+    assert.equal(controls.save.disabled, true);
+    assert.match(controls.message.textContent, /Обновите страницу/);
+    assert.equal(ui.state.trip, snapshot);
+    assert.deepEqual(ui.toasts, []);
+  }
+});
+
+test("day swap shows local validation failure and allows choosing another pair", async () => {
+  const ui = browser(), controls = daySwapForm(ui);
+  ui.context.api = async () => { throw Object.assign(new Error("Музей закрыт в выбранный день"), { status: 422 }); };
+  await controls.submit();
+  assert.equal(controls.message.textContent, "Музей закрыт в выбранный день");
+  assert.equal(controls.save.disabled, false);
+});
+
+test("unsupported day swap is disabled with the server reason, malformed capability fails closed", () => {
+  for (const mode of ["region", "revision", "duplicate", "single", "missing"]) {
+    const ui = browser(); daySwapForm(ui);
+    if (mode === "region") Object.assign(ui.state.trip, { day_swap_available: false,
+      day_swap_unavailable_reason: "Нужно пересчитать переезды и смену жилья." });
+    if (mode === "revision") ui.state.trip.revision = null;
+    if (mode === "duplicate") ui.state.trip.itinerary.days[1].day = 1;
+    if (mode === "single") ui.state.trip.itinerary.days = ui.state.trip.itinerary.days.slice(0, 1);
+    if (mode === "missing") delete ui.state.trip.day_swap_available;
+    ui.context.renderTripHeader();
+    const [copy, actions] = ui.element("tripHeader").children;
+    const open = actions.children.find((child) => child.textContent === "Поменять дни местами");
+    assert.equal(open.disabled, true);
+    assert.ok(!copy.children.some((child) => child.className === "day-swap-form"));
+    if (mode === "region") assert.match(elementText(copy), /пересчитать переезды/);
+  }
+});
+
 function creationBrowser() {
   const ui = browser();
   ui.context.newTripPayload = () => ({ destination: "Байкал, Россия" });

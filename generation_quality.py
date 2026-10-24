@@ -41,6 +41,7 @@ _REJECTIONS = {
     "invalid_coordinates", "invalid_record", "missing_locality", "missing_provider_identity",
     "name_mismatch", "name_type_conflict", "outside_city_radius", "unsupported_poi_type", "category_mismatch", "other",
     "amusement_interest_not_requested", "specialized_animal_reserve_limit",
+    "duplicate_canonical_query",
 }
 
 

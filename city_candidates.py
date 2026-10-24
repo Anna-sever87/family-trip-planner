@@ -62,6 +62,7 @@ _CATEGORY_TERMS = {"museums": "museum", "zoos": "zoo", "theatre": "theatre",
                    "cinema": "cinema", "parks": "park", "amusement_parks": "theme park",
                    "shopping_malls": "mall", "main_sights": "attraction"}
 DETAIL_REJECTION_REASONS = frozenset({
+    "duplicate_canonical_query",
     "empty_result", "invalid_record", "country_mismatch_or_missing", "invalid_coordinates",
     "outside_city_radius", "missing_provider_identity", "unsupported_poi_type", "name_mismatch",
     "name_type_conflict", "missing_locality", "canonical_record_mismatch", "source_identity_mismatch",
@@ -700,7 +701,7 @@ def ground_city_candidates(request: TripRequest, center: dict, *, completion: Ca
     source_hints = destination_name_hints(request.destination, limit=limit)
     source_hints = [{"title": hint["title"], "source_url": hint["source_url"]}
                     for hint in source_hints if _label(hint.get("title"))][:limit]
-    seen_names, seen_ids = set(), set()
+    seen_names, seen_ids, seen_queries = set(), set(), set()
     remaining_source_hints = []
     categories = _requested_categories(request)
     map_queue, deferred_ai = [], []
@@ -735,6 +736,14 @@ def ground_city_candidates(request: TripRequest, center: dict, *, completion: Ca
         identity = places.map_record_identity(record)
         if identity in seen_ids or len(result.candidates) >= usable_limit:
             return False
+        # The saved context and schedule bind visits by this exact canonical
+        # query as well as provider identity. Two observed OSM objects (or two
+        # same-named branches in one locality) cannot occupy the same key.
+        # Keep the first independently verified record unchanged: this is not
+        # evidence that the objects are identical and must not merge facts.
+        if record["place_query"] in seen_queries:
+            result.rejected.append({"reason": "duplicate_canonical_query"})
+            return False
         if _small_ride(record) and "amusement_parks" not in request.interest_categories:
             result.rejected.append({"reason": "amusement_interest_not_requested"})
             return False
@@ -745,6 +754,7 @@ def ground_city_candidates(request: TripRequest, center: dict, *, completion: Ca
             result.rejected.append({"reason": "specialized_animal_reserve_limit"})
             return False
         seen_ids.add(identity)
+        seen_queries.add(record["place_query"])
         result.candidates.append(CityCandidate(
             candidate_id="-".join(map(str, identity)),
             title=record["place_query"].split(",", 1)[0], place_query=record["place_query"],

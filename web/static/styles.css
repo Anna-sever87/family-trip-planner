@@ -181,6 +181,15 @@ button, input, select, textarea, summary, a { -webkit-tap-highlight-color: trans
 .trip-header h1 { font-size: clamp(26px, 2.8vw, 36px); margin-top: 0; }
 .trip-header-meta { color: var(--muted); font-size: 14px; line-height: 1.65; }
 .trip-header-actions { display: flex; flex-wrap: wrap; gap: 10px; }
+.trip-header > div:first-child { min-width: 0; flex: 1 1 auto; }
+.day-swap-form { margin-top: 16px; padding: 16px; border: 1px solid var(--line); border-radius: 12px; background: #edf3ff; }
+.day-swap-form[hidden] { display: none; }
+.day-swap-choices { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-bottom: 14px; }
+.day-swap-choices label, .day-swap-choices select { min-width: 0; width: 100%; }
+.day-swap-form .button { white-space: normal; text-align: center; }
+.day-swap-form .trip-header-meta { margin-bottom: 0; }
+.trip-header-actions .day-swap-toggle { white-space: normal; text-align: center; }
+@media (max-width: 600px) { .day-swap-choices { grid-template-columns: 1fr; } }
 .trip-notes { margin-bottom: 22px; line-height: 1.6; font-size: 14px; overflow-wrap: anywhere; }
 .trip-notes p, .trip-notes li { white-space: pre-wrap; }
 .trip-notes p { margin: 0 0 12px; }

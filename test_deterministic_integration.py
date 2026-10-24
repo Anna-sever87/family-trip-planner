@@ -200,16 +200,24 @@ class DeterministicIntegrationTests(unittest.TestCase):
                 if expected == "failed":
                     self.assertIn("selection_repair_failed", result.generation_coverage["quality_reasons"])
 
-    def test_free_text_restriction_does_not_trigger_depth_pressure_or_restore_rejected_places(self):
+    def test_free_text_review_can_retain_small_subset_without_restoring_rejected_places(self):
         value, pool, first, _ = self.depth_fixture()
         value.wishes = "Без пони-ферм и маленьких площадок с животными"
         result, completion = self.run_plan(trip_request=value,
             candidate_result=CityCandidateResult(candidates=pool),
-            selection_response=json.dumps({"status": "selected", "candidate_ids": first}))
+            selection_response=json.dumps({"status": "selected", "candidate_ids": first}),
+            repair_response=json.dumps({"status": "selected", "candidate_ids": first}))
         self.assertFalse(result.problems)
-        self.assertEqual(completion.call_count, 2)
-        self.assertFalse(result.generation_coverage["selection_repair_attempted"])
+        self.assertEqual((completion.call_count, result.attempts), (3, 3))
+        self.assertTrue(result.generation_coverage["selection_repair_attempted"])
+        self.assertEqual(result.generation_coverage["selection_repair_status"], "unchanged")
         self.assertEqual(result.generation_coverage["preference_candidates"], 5)
+        used = {item.place_query for day in result.itinerary.days for item in day.items if item.kind == "attraction"}
+        self.assertTrue(used <= {item.place_query for item in pool if item.candidate_id in first})
+        first_data = json.loads(completion.call_args_list[1].args[0][1]["content"])
+        review_data = json.loads(completion.call_args_list[2].args[0][1]["content"])
+        self.assertEqual(first_data["request"], value.model_dump(mode="json"))
+        self.assertEqual(review_data["request"], first_data["request"])
 
     def test_selection_refusal_does_not_silently_drop_preferences(self):
         value = request()
@@ -251,14 +259,19 @@ class DeterministicIntegrationTests(unittest.TestCase):
         value = request()
         value.interest_categories = ["museums", "shopping_malls"]
         value.wishes = "Без торговых центров"
+        selection = json.dumps({"status": "selected",
+                                "candidate_ids": [item.candidate_id for item in pool[:-1]]})
         result, completion = self.run_plan(trip_request=value,
-            candidate_result=CityCandidateResult(candidates=pool), selection_response=json.dumps({
-                "status": "selected", "candidate_ids": [item.candidate_id for item in pool[:-1]]}))
+            candidate_result=CityCandidateResult(candidates=pool),
+            selection_response=selection, repair_response=selection)
         self.assertEqual(result.problems, [])
         self.assertEqual(result.generation_coverage["requested_category_candidates"], 0)
         self.assertFalse(any(item.place_query == pool[-1].place_query
                              for day in result.itinerary.days for item in day.items))
-        self.assertEqual(completion.call_count, 2)
+        self.assertEqual((completion.call_count, result.attempts), (3, 3))
+        self.assertEqual(result.generation_coverage["selection_repair_status"], "unchanged")
+        review_data = json.loads(completion.call_args_list[2].args[0][1]["content"])
+        self.assertEqual(review_data["request"], value.model_dump(mode="json"))
 
     def test_missing_confirmed_mall_is_disclosed_without_rejecting_valid_trip(self):
         value = request()
@@ -331,15 +344,23 @@ class DeterministicIntegrationTests(unittest.TestCase):
         value = request()
         value.interest_categories = ["museums", "theatre"]
         value.wishes = "Не включать театр"
-        result, _ = self.run_plan(trip_request=value,
-            candidate_result=CityCandidateResult(candidates=pool), selection_response=json.dumps({
-                "status": "selected", "candidate_ids": [item.candidate_id for item in pool[:2]]}))
+        selection = json.dumps({"status": "selected",
+                                "candidate_ids": [item.candidate_id for item in pool[:2]]})
+        result, completion = self.run_plan(trip_request=value,
+            candidate_result=CityCandidateResult(candidates=pool),
+            selection_response=selection, repair_response=selection)
         self.assertFalse(result.problems)
         self.assertEqual(result.generation_coverage["quality_status"], "partial")
         self.assertEqual(result.generation_coverage["interest_coverage"]["theatre"],
                          {"status": "not_scheduled", "confirmed_count": 1, "selected_count": 0})
         self.assertIn("requested_interest_missing", result.generation_coverage["quality_reasons"])
         self.assertFalse(any("не отражены выбранные интересы" in tip for tip in result.itinerary.tips))
+        self.assertFalse(any(item.place_query == pool[-1].place_query
+                             for day in result.itinerary.days for item in day.items))
+        self.assertEqual((completion.call_count, result.attempts), (3, 3))
+        self.assertEqual(result.generation_coverage["selection_repair_status"], "unchanged")
+        review_data = json.loads(completion.call_args_list[2].args[0][1]["content"])
+        self.assertEqual(review_data["request"], value.model_dump(mode="json"))
 
     def test_default_form_preserves_all_checked_categories_without_semantic_selection(self):
         from test_city_deterministic import candidates

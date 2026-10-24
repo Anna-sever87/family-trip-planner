@@ -114,6 +114,46 @@ class CityDayBalanceTests(unittest.TestCase):
         self.assertIn("day_window_unbalanced", result.coverage["quality_reasons"])
         self.assertTrue(all(start(item) + item.duration_min <= 13 * 60 for item in visits(result.itinerary)))
 
+    def test_exhausted_long_calendar_search_keeps_capacity_for_enrichment_and_afternoon(self):
+        # Structural reproduction of the acceptance failure, not real personal
+        # data or a claim that these synthetic objects are the actual city.
+        req, pool = request(14, end_time="18:00", children_ages=[14]), candidates(14, separation=.002)
+        durations = [120] + [90] * 10 + [45] * 3
+        chosen = [replace(option, duration_min=duration)
+                  for option, duration in zip(options(pool, cost=None), durations)]
+        before = [item.model_dump() if hasattr(item, 'model_dump') else deepcopy(item) for item in chosen]
+        result = self.build(req, pool, chosen)
+        self.assertEqual(result.coverage["program_days"], 7)
+        self.assertFalse(result.coverage["search_complete"])
+        self.assertIn("search_limit", result.coverage["reason_codes"])
+        self.assertEqual(result.coverage["selected_unique_visits"], 14)
+        self.assertEqual(result.coverage["enrichment_visits"], 1)
+        self.assertEqual(sorted(item.duration_min for item in visits(result.itinerary)), sorted(durations))
+        self.assertEqual(chosen, before)
+        self.assertEqual(result.coverage["quality_status"], "partial")
+        self.assertIn("day_program_light", result.coverage["quality_reasons"])
+        program = [day for day in result.itinerary.days if any(item.kind == "attraction" for item in day.items)]
+        self.assertEqual(len(program), 7)
+        for day in program:
+            points = [item for item in day.items if item.kind == "attraction"]
+            self.assertTrue(any(start(item) < 13 * 60 for item in points))
+            self.assertTrue(any(start(item) >= 14 * 60 for item in points))
+
+    def test_reserved_balance_never_overrides_closed_morning_windows(self):
+        req, pool = request(14, end_time="18:00", children_ages=[14]), candidates(14, separation=.002)
+        durations = [120] + [90] * 10 + [45] * 3
+        from datetime import date, timedelta
+        dates = [(date.fromisoformat(req.start_date) + timedelta(days=index)).isoformat() for index in range(14)]
+        windows = tuple({"date": value, "start": "09:00", "end": "13:00", "basis": "source"}
+                        for value in dates)
+        chosen = [replace(option, duration_min=duration, opening_windows=windows)
+                  for option, duration in zip(options(pool, cost=None), durations)]
+        result = self.build(req, pool, chosen)
+        self.assertGreaterEqual(result.coverage["program_days"], 7)
+        self.assertEqual(result.coverage["quality_status"], "partial")
+        self.assertIn("day_window_unbalanced", result.coverage["quality_reasons"])
+        self.assertTrue(all(start(item) + item.duration_min <= 13 * 60 for item in visits(result.itinerary)))
+
     def test_colocated_pair_is_not_separated_to_fake_a_full_day(self):
         req, pool = request(1, end_time="18:00"), candidates(2, separation=0)
         result = self.build(req, pool)

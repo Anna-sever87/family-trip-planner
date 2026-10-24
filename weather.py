@@ -195,14 +195,99 @@ def _get_json(url: str, **params) -> Dict[str, Any]:
     raise RuntimeError("Weather request bound exhausted")
 
 
+def _city_matches(results, city_name, country, code, *, admin=""):
+    """Keep the same strict identity checks for lookup and clarification."""
+    from places import _context_identity, _country_identity
+
+    country_identity = _country_identity(country) if country else ()
+    matches = {}
+    for found in results:
+        if not isinstance(found, dict) or _context_identity(found.get("name", "")) != _context_identity(city_name):
+            continue
+        lat, lon = found.get("latitude"), found.get("longitude")
+        if (type(lat) not in (int, float) or type(lon) not in (int, float)
+                or not math.isfinite(lat) or not math.isfinite(lon)
+                or not -90 <= lat <= 90 or not -180 <= lon <= 180):
+            continue
+        feature = found.get("feature_code", "")
+        if feature and (not isinstance(feature, str) or not feature.startswith("PPL")):
+            continue
+        actual_code = str(found.get("country_code", "")).strip().casefold()
+        if country:
+            if code and actual_code:
+                if actual_code != code:
+                    continue
+            elif _country_identity(found.get("country", "")) != country_identity:
+                continue
+        if admin and _context_identity(found.get("admin1", "")) != _context_identity(admin):
+            continue
+        key = (str(found.get("id", "")), float(lat), float(lon), actual_code,
+               _context_identity(found.get("admin1", "")))
+        matches[key] = found
+    return matches
+
+
+def _city_clarification(destination, matches):
+    from places import _context_identity
+
+    labels = {}
+    for found in matches.values():
+        parts = [found.get(key) for key in ("name", "admin1", "country")]
+        if not all(isinstance(part, str) and part.strip() for part in parts):
+            continue
+        suggestions = safe_city_suggestions([", ".join(parts)])
+        if suggestions:
+            label = suggestions[0]
+            # Same-admin homonyms cannot be resolved by this label alone.
+            identity = tuple(_context_identity(part) for part in label.split(","))
+            labels.setdefault(identity, []).append((label, found))
+    offered = [values[0] for values in labels.values() if len(values) == 1]
+    return CityResolutionError(destination, reason="ambiguous",
+                              suggestions=[label for label, _ in offered], suggestion_details=[
+        {"label": label, "feature_label": _CITY_FEATURE_LABELS.get(found.get("feature_code"), "")
+         if isinstance(found.get("feature_code"), str) else "",
+         "admin2": found.get("admin2"), "population": found.get("population")}
+        for label, found in offered
+    ])
+
+
+def _clarify_empty_admin(destination, city_name, country, code, language):
+    """One bounded lookup for choices, never a fallback resolved destination.
+
+    A manually entered admin spelling can differ from the provider's label.
+    Only an empty successful explicit-admin lookup reaches this function. The
+    original country and exact city stay mandatory; even a single alternative
+    requires a separate user choice and another normal strict preflight.
+    """
+    query = city_name if code else f"{city_name}, {country}"
+    params = dict(name=query, count=MAX_CITY_RESULTS, language=language)
+    if code:
+        params["countryCode"] = code.upper()
+    data = _get_json(GEOCODING_URL, **params)
+    if not isinstance(data, dict):
+        raise CityResolutionError(destination, reason="invalid_response")
+    results = data.get("results")
+    if not results:
+        return
+    if not isinstance(results, list):
+        raise CityResolutionError(destination, reason="invalid_response")
+    if len(results) >= MAX_CITY_RESULTS:
+        raise CityResolutionError(destination, reason="search_limit")
+    matches = _city_matches(results, city_name, country, code)
+    if matches:
+        raise _city_clarification(destination, matches)
+
+
 def find_city(destination: str) -> Optional[Dict[str, Any]]:
     """Resolve city[, admin1], country without discarding geographic context.
 
     A bare city remains supported, but only an unambiguous exact-name result
     is usable. Provider ranking/population never chooses among homonyms.
+    An empty admin-qualified lookup can add one clarification-only query;
+    at most two queries / four HTTP sends, with the existing retry limits.
     This is a bounded read-only search, not a catalogue of city coordinates.
     """
-    from places import _context_identity, _country_identity
+    from places import _country_identity
 
     if not isinstance(destination, str) or not destination.strip() or not destination.isprintable() or len(destination) > 240:
         raise CityResolutionError(str(destination), reason="invalid_context")
@@ -228,57 +313,18 @@ def find_city(destination: str) -> Optional[Dict[str, Any]]:
         raise CityResolutionError(destination, reason="invalid_response")
     results = data.get("results")
     if not results:
+        if admin:
+            _clarify_empty_admin(destination, city_name, country, code, language)
         return None
     if not isinstance(results, list):
         raise CityResolutionError(destination, reason="invalid_response")
-    matches = {}
-    for found in results:
-        if not isinstance(found, dict) or _context_identity(found.get("name", "")) != _context_identity(city_name):
-            continue
-        lat, lon = found.get("latitude"), found.get("longitude")
-        if (type(lat) not in (int, float) or type(lon) not in (int, float)
-                or not math.isfinite(lat) or not math.isfinite(lon)
-                or not -90 <= lat <= 90 or not -180 <= lon <= 180):
-            continue
-        feature = found.get("feature_code", "")
-        if feature and (not isinstance(feature, str) or not feature.startswith("PPL")):
-            continue
-        actual_code = str(found.get("country_code", "")).strip().casefold()
-        if country:
-            if code and actual_code:
-                if actual_code != code:
-                    continue
-            elif _country_identity(found.get("country", "")) != country_identity:
-                continue
-        if admin and _context_identity(found.get("admin1", "")) != _context_identity(admin):
-            continue
-        # Repeated copies of one provider result are not different cities;
-        # conflicting coordinates still remain an ambiguity, even for one ID.
-        key = (str(found.get("id", "")), float(lat), float(lon), actual_code,
-               _context_identity(found.get("admin1", "")))
-        matches[key] = found
+    # Repeated copies of one provider result are not different cities;
+    # conflicting coordinates still remain an ambiguity, even for one ID.
+    matches = _city_matches(results, city_name, country, code, admin=admin)
     if not matches:
         raise CityResolutionError(destination, reason="context_mismatch")
     if len(matches) > 1:
-        labels = {}
-        for found in matches.values():
-            parts = [found.get(key) for key in ("name", "admin1", "country")]
-            if not all(isinstance(part, str) and part.strip() for part in parts):
-                continue
-            suggestions = safe_city_suggestions([", ".join(parts)])
-            if suggestions:
-                label = suggestions[0]
-                # Same-admin homonyms cannot be resolved by this label alone.
-                identity = tuple(_context_identity(part) for part in label.split(","))
-                labels.setdefault(identity, []).append((label, found))
-        offered = [values[0] for values in labels.values() if len(values) == 1]
-        raise CityResolutionError(destination, reason="ambiguous",
-                                  suggestions=[label for label, _ in offered], suggestion_details=[
-            {"label": label, "feature_label": _CITY_FEATURE_LABELS.get(found.get("feature_code"), "")
-             if isinstance(found.get("feature_code"), str) else "",
-             "admin2": found.get("admin2"), "population": found.get("population")}
-            for label, found in offered
-        ])
+        raise _city_clarification(destination, matches)
     if len(results) >= MAX_CITY_RESULTS:
         raise CityResolutionError(destination, reason="search_limit")
     found = next(iter(matches.values()))
