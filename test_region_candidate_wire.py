@@ -91,6 +91,8 @@ class RegionCandidateWireTests(unittest.TestCase):
         self.assertEqual(result.rejected, [])
         self.assertEqual(completion.call_args.kwargs['json_schema'], grounding.build_candidate_schema(request()))
         self.assertIn('Не пиши place_query', completion.call_args.args[0][0]['content'])
+        self.assertIn('Не исключай города внутри региона', completion.call_args.args[0][0]['content'])
+        self.assertIn('единственная основа недельной программы', completion.call_args.args[0][0]['content'])
 
     def test_nonadministrative_region_is_not_invented_as_base_address_province(self):
         data = wire(2)

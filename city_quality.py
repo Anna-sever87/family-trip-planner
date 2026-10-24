@@ -10,10 +10,11 @@ No lookup, cache access, mutation or automatic metadata correction occurs here.
 from __future__ import annotations
 
 import math
+import re
 import unicodedata
 from typing import Mapping
 
-from places import distance_km
+from places import _context_identity, _country_identity, distance_km, map_record_identity
 from program_coverage import authorized_free_days
 from rules import _schedule_is_explicit, _time_minutes
 from schemas import Itinerary, TripRequest
@@ -34,6 +35,83 @@ _NO_INDOOR_EVIDENCE_TYPES = frozenset({
     "peak", "lake", "artwork", "monument", "memorial", "archaeological_site",
 })
 _SHORT_STOP_TYPES = frozenset({"artwork", "monument", "memorial"})
+
+# A narrow hard constraint, not a replacement for the semantic wish selector.
+# No place names, guessed translations or radius-as-boundary rule belong here.
+_CITY_ONLY = re.compile(
+    r"\b(?:в\s+(?:пределах|границах|черте)\s+(?:(?:выбранного|этого|самого)\s+)?города|"
+    r"(?:только|строго|исключительно)\s+(?:в\s+(?:самом\s+)?городе|по\s+городу)|"
+    r"(?:не\s+выезжать|без\s+выездов)\s+за\s+(?:пределы\s+города|город)|"
+    r"(?:only|strictly)\s+(?:within|in)\s+(?:the\s+)?city|"
+    r"within\s+(?:the\s+)?city\s+(?:limits|boundaries)|"
+    r"(?:do\s+not|don't)\s+leave\s+(?:the\s+)?city)\b")
+_NEGATED_CITY_ONLY = re.compile(
+    r"\b(?:не|not)(?:\s+(?:только|хочу|хотим|нужно|надо|обязательно|оставаться|ограничива\w*|маршрут|"
+    r"only|want|need|limited|restricted|staying|to)){0,3}\s*$")
+CITY_ONLY_WARNING = (
+    "Запрошена программа только в выбранном городе. Принадлежность части мест этому населённому пункту "
+    "не подтверждена адресом карты; они не включены. Радиус поиска не считается границей города. "
+    "Это не означает, что подходящих мест в городе нет."
+)
+
+
+def city_only_requested(request: TripRequest) -> bool:
+    """Recognize explicit current RU/EN scope, never exclusions from memory."""
+    if request.destination_kind != "city":
+        return False
+    for raw in (request.trip_goal, request.wishes):
+        text = unicodedata.normalize("NFKC", raw).casefold().replace("ё", "е").replace("’", "'")
+        for clause in re.split(r"[.!?;\n]+", text):
+            for match in _CITY_ONLY.finditer(clause):
+                if _NEGATED_CITY_ONLY.search(clause[:match.start()]):
+                    continue
+                if re.match(r"\s+не\s+(?:обязательно|нужно|надо|хочу|хотим)\b", clause[match.end():]):
+                    continue
+                return True
+    return False
+
+
+def city_only_record_allowed(request: TripRequest, record: Mapping | None) -> bool:
+    """Necessary source-address evidence, NOT an inferred municipal polygon.
+
+    Callers still independently verify the provider record, identity, country,
+    coordinates and radius. Only existing geographic aliases are recognized;
+    a POI's title/name:ru, county, district or proximity cannot prove its city.
+    Missing or differently written locality is unconfirmed, not 'outside'.
+    """
+    if not city_only_requested(request):
+        return True
+    if not isinstance(record, dict) or map_record_identity(record) is None:
+        return False
+    parts = [part.strip() for part in request.destination.split(",")]
+    address = record.get("address")
+    if len(parts) < 2 or any(not part for part in parts) or not isinstance(address, dict):
+        return False
+    expected_country = _country_identity(parts[-1])
+    code = address.get("country_code")
+    country = address.get("country")
+    if (not isinstance(code, str) or not re.fullmatch(r"[a-zA-Z]{2}", code)
+            or not isinstance(country, str) or not country.strip()):
+        return False
+    actual_country = _country_identity(country)
+    expected_code = expected_country[0] if len(expected_country) == 1 and len(expected_country[0]) == 2 else ""
+    actual_code = actual_country[0] if len(actual_country) == 1 and len(actual_country[0]) == 2 else ""
+    if (expected_code and code.lower() != expected_code
+            or actual_code and code.lower() != actual_code
+            or not expected_code and expected_country != actual_country):
+        return False
+    target = _context_identity(parts[0])
+    localities = [address.get(key) for key in ("city", "town") if address.get(key)]
+    if not target or not localities or any(not isinstance(value, str) or _context_identity(value) != target
+                                           for value in localities):
+        return False
+    # A smaller separately named settlement is not promoted to the city merely
+    # because a broader address field contains the requested municipality.
+    for key in ("village", "hamlet"):
+        value = address.get(key)
+        if value and (not isinstance(value, str) or _context_identity(value) != target):
+            return False
+    return True
 
 
 def _name_words(value: str) -> tuple[str, ...]:
@@ -264,6 +342,10 @@ def check_city_quality(itinerary: Itinerary, request: TripRequest,
         visits = [item for item in day.items if item.kind == "attraction"]
         for item in visits:
             record = _bound_record(item, records)
+            if not city_only_record_allowed(request, record):
+                problems.append(f"День {day.day}: принадлежность посещения выбранному городу не подтверждена "
+                                "адресом карты при явном ограничении «только в городе». "
+                                "Радиус, название объекта и соседний район не подтверждают это условие.")
             map_type = _map_type(record) if record is not None else ""
             if map_type == "peak":
                 problems.append(

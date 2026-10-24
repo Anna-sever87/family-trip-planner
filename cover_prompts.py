@@ -14,7 +14,7 @@ import re
 import unicodedata
 
 
-COVER_PROMPT_VERSION = "destination-cover-v12"
+COVER_PROMPT_VERSION = "destination-cover-v13"
 COVER_DISCLOSURE = "ИИ-иллюстрация направления, не фотография места"
 
 COVER_SYSTEM_PROMPT = """Create a premium editorial travel illustration, not documentary evidence.
@@ -394,6 +394,13 @@ def build_cover_prompt(
     subject_label = subject_location = ""
     if provider_prompt:
         subject_label = illustrated_title if subject_data is not None else _SCENE_CAPTIONS[template_key]
+        if subject_data is not None and not re.search(r"[А-Яа-яЁё]", subject_label):
+            # A type explanation is not a translation of the proper name.
+            # Keep the observed identity untouched, and do not crowd it out
+            # merely to add an optional application-owned Russian category.
+            described = subject_label + " (" + _SUBJECT_LABELS[subject.kind] + ")"
+            if len(described) <= 120:
+                subject_label = described
         subject_location = (subject_data["locality"] + ", " + subject_data["country"]
                             if subject_data is not None else destination + ", " + country)
     caption = json.dumps([subject_label, subject_location], ensure_ascii=False, separators=(",", ":"))

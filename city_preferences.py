@@ -152,9 +152,19 @@ def select_city_preferences(request, candidates, *, memory_context="", completio
     if not known or len(known) != len(candidates) or len(known) > 24:
         return CityPreferenceResult(status="insufficient_data", problems=["Нет проверенного набора для учёта пожеланий."],
                                     diagnostics=selection_diagnostics)
+    from city_quality import CITY_ONLY_WARNING, city_only_record_allowed
+    warnings = []
+    scoped = [item for item in candidates if city_only_record_allowed(request, item.record)]
+    if len(scoped) != len(candidates):
+        warnings.append(CITY_ONLY_WARNING)
+        if not scoped:
+            return CityPreferenceResult(status="insufficient_data", problems=[CITY_ONLY_WARNING],
+                                        diagnostics=selection_diagnostics)
+        candidates = scoped
+        known = {item.candidate_id: item for item in candidates}
+    # Do not erase free text or bypass its semantic selection after this filter.
     shopping = shopping_preference(request)
     shopping_ids = {item.candidate_id for item in candidates if is_shopping_candidate(item)}
-    warnings = []
     if shopping == "requested" and not shopping_ids:
         warnings.append("Не удалось подтвердить подходящий торговый центр; он не включён в программу. "
                         "Ограниченный поиск не доказывает, что торговых центров в городе нет.")
@@ -389,4 +399,5 @@ def select_city_preferences(request, candidates, *, memory_context="", completio
             selected = reviewed
         else:
             diagnostics["selection_repair_status"] = "unchanged"
+    selected.warnings = list(dict.fromkeys([*warnings, *selected.warnings]))
     return selected

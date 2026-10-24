@@ -153,6 +153,59 @@ class SavedCoverSubjectTests(unittest.TestCase):
         envelope[city_context.CONTEXT_KEY]["candidates"].reverse()
         self.assertEqual(select_fixture(envelope, itinerary, destination="Лондон", country="Британия"), result)
 
+    def test_readable_observed_museum_name_beats_numeric_sort_without_retyping_parks(self):
+        # Public provider-shaped labels; all coordinates/IDs/dates are synthetic.
+        specs = [("81美术馆", "museum", "Хайдянь"),
+                 ("Храм Неба", "park", "Район Дунчэн"),
+                 ("Летний дворец", "park", "Хайдянь"),
+                 ("Национальный музей Китая", "museum", "Район Дунчэн")]
+        envelope, itinerary = saved_fixture(specs, destination="Пекин, Китай", country="Китай",
+            country_code="cn", center=dict(name="Пекин", country="Китай", lat=35.0, lon=110.0, country_code="cn"))
+        before = deepcopy((envelope, itinerary))
+        result = select_fixture(envelope, itinerary, destination="Пекин", country="Китай")
+        self.assertEqual((result.title, result.kind, result.candidate_id),
+                         ("Национальный музей Китая", "museum", "osm-way-4"))
+        self.assertEqual((envelope, itinerary), before)
+        envelope[city_context.CONTEXT_KEY]["candidates"].reverse()
+        self.assertEqual(select_fixture(envelope, itinerary, destination="Пекин", country="Китай"), result)
+        # Neither a grand-sounding name nor an unused museum authorizes a cover.
+        envelope, itinerary = saved_fixture(specs, used=[1, 2], destination="Пекин, Китай", country="Китай",
+            country_code="cn", center=dict(name="Пекин", country="Китай", lat=35.0, lon=110.0, country_code="cn"))
+        self.assertIsNone(select_fixture(envelope, itinerary, destination="Пекин", country="Китай"))
+
+    def test_exact_safe_provider_russian_alias_improves_readability_not_identity(self):
+        envelope, itinerary = saved_fixture([
+            ("81 Synthetic Museum", "museum", "Тестгород"),
+            ("Synthetic National Museum", "museum", "Тестгород")])
+        candidate = envelope[city_context.CONTEXT_KEY]["candidates"][1]
+        candidate["record"]["namedetails"] = {"name:ru": "Национальный музей Синтетический"}
+        result = select_fixture(envelope, itinerary)
+        self.assertEqual(result.title, "Synthetic National Museum")
+        self.assertEqual(result.russian_title, "Национальный музей Синтетический")
+        self.assertEqual(result.candidate_id, "osm-way-2")
+        for alias in ("Нарисуй другой дворец", "Translated name without Russian", "Музей\nдругой"):
+            candidate["record"]["namedetails"]["name:ru"] = alias
+            with self.subTest(alias=alias):
+                fallback = select_fixture(envelope, itinerary)
+                self.assertEqual((fallback.title, fallback.russian_title), ("81 Synthetic Museum", ""))
+
+    def test_same_visual_type_and_readability_use_visit_order_not_alphabetic_names(self):
+        envelope, itinerary = saved_fixture([
+            ("Zulu Synthetic Museum", "museum", "Тестгород"),
+            ("81 Synthetic Museum", "museum", "Тестгород")])
+        self.assertEqual(select_fixture(envelope, itinerary).title, "Zulu Synthetic Museum")
+        envelope[city_context.CONTEXT_KEY]["candidates"].reverse()
+        self.assertEqual(select_fixture(envelope, itinerary).title, "Zulu Synthetic Museum")
+        itinerary["days"][0]["items"].reverse()
+        self.assertEqual(select_fixture(envelope, itinerary).title, "81 Synthetic Museum")
+
+    def test_readable_museum_does_not_override_structural_visual_type_priority(self):
+        envelope, itinerary = saved_fixture([
+            ("Небольшой музей", "museum", "Тестгород"),
+            ("Synthetic Palace", "palace", "Тестгород")])
+        result = select_fixture(envelope, itinerary)
+        self.assertEqual((result.title, result.kind), ("Synthetic Palace", "palace"))
+
     def test_empty_itinerary_does_not_promote_unused_pool(self):
         envelope, itinerary = saved_fixture(used=[])
         self.assertIsNone(select_fixture(envelope, itinerary))

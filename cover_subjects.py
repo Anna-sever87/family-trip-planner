@@ -32,6 +32,8 @@ def select_saved_cover_subject(request_json, itinerary_json, *, destination, cou
     Only actual visits are eligible. Their observed locality remains explicit:
     a nearby settlement is never relabelled as the trip's destination city.
     Category priority is visual suitability, not a claim of fame or popularity.
+    Within a category prefer an observed Russian name for a readable caption,
+    then the actual visit order; alphabetic/numeric names do not imply priority.
     """
     try:
         if (not isinstance(request_json, str) or len(request_json) > 250_000
@@ -46,8 +48,11 @@ def select_saved_cover_subject(request_json, itinerary_json, *, destination, cou
         pool, center = city_context.load_city_context(envelope.get(city_context.CONTEXT_KEY), request)
         itinerary = Itinerary.model_validate(json.loads(itinerary_json))
         city_context.check_context_places(itinerary, pool)
-        visits = {item.place_query for day in itinerary.days for item in day.items
-                  if item.kind == "attraction"}
+        visits = {}
+        for day in itinerary.days:
+            for item in day.items:
+                if item.kind == "attraction":
+                    visits.setdefault(item.place_query, len(visits))
         eligible = []
         for candidate in pool:
             kind = candidate.record.get("type")
@@ -80,9 +85,13 @@ def select_saved_cover_subject(request_json, itinerary_json, *, destination, cou
                     russian_title = safe_subject_title(alias)
                 except ValueError:
                     pass
-            eligible.append((_PRIORITY[kind], title.casefold(), candidate.candidate_id,
+            # Readability is not a popularity inference. Use only a safe exact
+            # name already observed in this record, never a generated translation
+            # or words such as "palace" in a park name to override its map type.
+            readable = bool(russian_title or re.search(r"[А-Яа-яЁё]", title))
+            eligible.append((_PRIORITY[kind], not readable, visits[candidate.place_query], candidate.candidate_id,
                              CoverSubject(title, kind, candidate.candidate_id, destination, country,
                                           locality, local_country, country_code.lower(), russian_title)))
-        return min(eligible, key=lambda entry: entry[:3])[3] if eligible else None
+        return min(eligible, key=lambda entry: entry[:4])[4] if eligible else None
     except (ValueError, TypeError, KeyError, AttributeError, OverflowError, RecursionError):
         return None

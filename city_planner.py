@@ -56,6 +56,7 @@ def _discovery_diagnostics(pool) -> dict:
         "invalid_record", "missing_locality", "missing_provider_identity", "name_mismatch",
         "name_type_conflict", "outside_city_radius", "unsupported_poi_type",
         "amusement_interest_not_requested", "specialized_animal_reserve_limit",
+        "duplicate_canonical_query", "city_only_membership_unconfirmed",
     }
     rejected = getattr(pool, "rejected", ())
     rejected = rejected if isinstance(rejected, (list, tuple)) else ()

@@ -68,6 +68,7 @@ DETAIL_REJECTION_REASONS = frozenset({
     "name_type_conflict", "missing_locality", "canonical_record_mismatch", "source_identity_mismatch",
     "category_mismatch", "map_unavailable_or_invalid_response", "shared_map_clock_unavailable",
     "amusement_interest_not_requested", "specialized_animal_reserve_limit",
+    "city_only_membership_unconfirmed",
 })
 _LOCAL_NAME_LANGUAGES = {"vn": "vi,en", "tr": "tr,en"}
 # Language choice must not silently reduce the reserve for a longer trip.
@@ -709,7 +710,8 @@ def ground_city_candidates(request: TripRequest, center: dict, *, completion: Ca
     result.diagnostics.update(map_discovery_status="not_requested", map_discovery_error="none",
                               category_fallback_status="not_requested", replenishment_attempted=False,
                               source_alternatives_confirmed=0)
-    from city_quality import _family_minimum, desired_city_program_minutes
+    from city_quality import (CITY_ONLY_WARNING, _family_minimum, city_only_record_allowed,
+                              desired_city_program_minutes)
     from city_visit_options import visit_option
     from rules import program_depth_target
     minimum = _family_minimum(request) or program_depth_target(request) or 1
@@ -735,6 +737,9 @@ def ground_city_candidates(request: TripRequest, center: dict, *, completion: Ca
     def append_record(record):
         identity = places.map_record_identity(record)
         if identity in seen_ids or len(result.candidates) >= usable_limit:
+            return False
+        if not city_only_record_allowed(request, record):
+            result.rejected.append({"reason": "city_only_membership_unconfirmed"})
             return False
         # The saved context and schedule bind visits by this exact canonical
         # query as well as provider identity. Two observed OSM objects (or two
@@ -883,6 +888,10 @@ def ground_city_candidates(request: TripRequest, center: dict, *, completion: Ca
             "pool_quality": "adequate" if adequate() else "limited" if result.candidates else "empty",
         })
         enough = bool(result.candidates) and (allow_partial_program or len(result.candidates) >= request.days_count)
+        if details.get("city_only_membership_unconfirmed"):
+            (result.warnings if enough else result.problems).append(CITY_ONLY_WARNING)
+            if not enough:
+                result.status = "insufficient_data"
         if error:
             if enough:
                 result.warnings.append(error)
@@ -967,6 +976,7 @@ def ground_city_candidates(request: TripRequest, center: dict, *, completion: Ca
             "если конкретное собственное название неизвестно. Не предполагай, что в каждом городе есть зоопарк "
             "или несколько музеев. Допустим короткий или пустой список; это лучше выдуманных кандидатов. "
             "Выбирай места в городе и не далее radius_km от его подтверждённого центра. "
+            "Если явно запрошены пределы города, не включай соседние населённые пункты: радиус не граница города. "
             "Не предлагай саму горную вершину или остров вместо конкретного посетительского объекта "
             "с независимо подтверждаемым доступом. Координата вершины/острова не доказывает доступ; "
             "не выдумывай подъёмник, маршрут подъёма, переправу или их стоимость. "

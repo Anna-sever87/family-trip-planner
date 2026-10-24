@@ -212,7 +212,21 @@ class GroundedPlannerTests(unittest.TestCase):
         self.assertEqual((generate.call_count, result.attempts), (1, 1))
         self.assertEqual(result.itinerary.days, [])
         self.assertTrue(any("подтверждено 6 мест" in problem for problem in result.problems))
+        self.assertEqual(result.generation_status, "insufficient_data")
         self.assertEqual((result.prompt_tokens, result.completion_tokens), (11, 13))
+        verify.assert_not_called()
+
+    def test_zero_confirmed_places_is_data_failure_not_generic_validation(self):
+        payload = _batch(_source())
+        with ExitStack() as stack:
+            generate, _, verify = self._context(
+                stack, [json.dumps(payload)], payload=payload,
+                unconfirmed={poi["title"] for poi in payload["pois"]},
+            )
+            result = planner.generate_itinerary(regional._request(), max_attempts=3, ground_candidates=True)
+        self.assertEqual(result.generation_status, "insufficient_data")
+        self.assertEqual(result.itinerary.days, [])
+        self.assertEqual((generate.call_count, result.attempts), (1, 1))
         verify.assert_not_called()
 
     def test_too_few_proposals_stop_before_any_map_lookup(self):

@@ -86,7 +86,7 @@ class CoverPromptTests(unittest.TestCase):
                 self.assertIn("ИИ-обложка", prompt.provider_prompt)
                 self.assertNotIn("синий/белый", prompt.provider_prompt)
                 self.assertLessEqual(len(prompt.provider_prompt), 500)
-                self.assertEqual(prompt.version, "destination-cover-v12")
+                self.assertEqual(prompt.version, "destination-cover-v13")
 
     def test_full_provider_prompt_keeps_whole_subject_or_coherent_shore_at_ground_level(self):
         for city, country in (("Москва", "Россия"), ("Сочи", "Россия"),
@@ -215,7 +215,7 @@ class CoverPromptTests(unittest.TestCase):
                       prompt.provider_prompt)
         self.assertIn("Общий внешний план с земли издалека", prompt.provider_prompt)
         self.assertIn('["Новосибирск","Россия"]', prompt.provider_prompt)
-        self.assertEqual(prompt.version, "destination-cover-v12")
+        self.assertEqual(prompt.version, "destination-cover-v13")
         self.assertLessEqual(len(prompt.provider_prompt), 500)
         self.assertNotIn("колонн", prompt.provider_prompt)
         self.assertNotIn("купол", prompt.provider_prompt)
@@ -311,7 +311,7 @@ class CoverPromptTests(unittest.TestCase):
                                "Greater London", "United Kingdom", "gb")
         prompt = build_cover_prompt("Лондон", "Британия", "2026-11-02", "2026-11-05", subject=subject)
         self.assertTrue(prompt.generation_allowed)
-        self.assertEqual(prompt.subject_label, "British Museum")
+        self.assertEqual(prompt.subject_label, "British Museum (музей)")
         self.assertEqual(prompt.subject_location, "Greater London, United Kingdom")
         self.assertNotEqual(prompt.subject_location, "Лондон, Британия")
         with self.assertRaises(FrozenInstanceError):
@@ -333,6 +333,48 @@ class CoverPromptTests(unittest.TestCase):
                 self.assertEqual(prompt.subject_location, city + ", " + country)
         unknown = self.build("Unknown city", "Unknown country")
         self.assertEqual((unknown.subject_label, unknown.subject_location), ("", ""))
+
+    def test_foreign_subject_caption_explains_verified_type_without_inventing_translation(self):
+        from cover_prompts import _SUBJECT_LABELS
+        for kind, explanation in _SUBJECT_LABELS.items():
+            subject = CoverSubject("81美术馆", kind, "osm-way-11", "Тестгород", "Россия")
+            with self.subTest(kind=kind):
+                prompt = build_cover_prompt("Тестгород", "Россия", "2026-11-02", "2026-11-05", subject=subject)
+                self.assertTrue(prompt.generation_allowed)
+                self.assertEqual(prompt.subject_label, "81美术馆 (" + explanation + ")")
+                self.assertLessEqual(len(prompt.subject_label), 120)
+                self.assertLessEqual(len(prompt.provider_prompt), 500)
+                self.assertIn('"81美术馆"', prompt.provider_prompt)
+                data = json.loads(prompt.user_prompt)["verified_subject"]
+                self.assertEqual((data["title"], data["kind"], data["candidate_id"]),
+                                 ("81美术馆", kind, "osm-way-11"))
+                self.assertNotIn("russian_title", data)
+                self.assertEqual(subject.russian_title, "")
+
+    def test_observed_russian_title_or_alias_needs_no_fake_category_translation(self):
+        for subject, expected in (
+                (CoverSubject("Национальный музей", "museum", "osm-way-11", "Тестгород", "Россия"),
+                 "Национальный музей"),
+                (CoverSubject("Observed Museum", "museum", "osm-way-11", "Тестгород", "Россия",
+                              russian_title="Наблюдаемый музей"),
+                 "Observed Museum (Наблюдаемый музей)")):
+            with self.subTest(title=subject.title):
+                prompt = build_cover_prompt("Тестгород", "Россия", "2026-11-02", "2026-11-05", subject=subject)
+                self.assertTrue(prompt.generation_allowed)
+                self.assertEqual(prompt.subject_label, expected)
+
+    def test_foreign_category_caption_never_truncates_long_original_name(self):
+        for length in (90, 110, 120):
+            subject = CoverSubject("X" * length, "museum", "osm-way-11", "Test", "RU")
+            prompt = build_cover_prompt("Test", "RU", "2026-11-02", "2026-11-05", subject=subject)
+            with self.subTest(length=length):
+                self.assertLessEqual(len(prompt.provider_prompt), 500)
+                self.assertLessEqual(len(prompt.subject_label), 120)
+                if prompt.generation_allowed:
+                    self.assertTrue(prompt.subject_label.startswith(subject.title))
+                    self.assertIn('"' + subject.title + '"', prompt.provider_prompt)
+                else:
+                    self.assertEqual(prompt.subject_label, "")
 
     def test_prompt_budget_never_truncates_subject_or_drops_full_object_composition(self):
         allowed = rejected = False

@@ -5210,6 +5210,7 @@ def generate_itinerary(
                 ],
                 attempts=grounding_calls, prompt_tokens=grounding.input_tokens,
                 completion_tokens=grounding.output_tokens, weather_text=weather_text,
+                generation_status="insufficient_data",
             )
         map_hints = list(grounding.confirmed_hints)
 
@@ -5248,6 +5249,7 @@ def generate_itinerary(
                           "недостаточно даже для проверенной программы со свободными днями."],
                 attempts=grounding_calls, prompt_tokens=grounding.input_tokens,
                 completion_tokens=grounding.output_tokens, weather_text=weather_text,
+                generation_status="insufficient_data",
             )
 
     map_hints_text = _map_hints_block(

@@ -6,6 +6,19 @@ from generation_quality import memory_note, public_quality, safe_coverage
 
 
 class GenerationQualityTests(unittest.TestCase):
+    def test_city_scope_rejection_is_bounded_and_does_not_store_provider_text(self):
+        from city_planner import _discovery_diagnostics
+        pool = SimpleNamespace(candidates=[], rejected=[
+            {"reason": "city_only_membership_unconfirmed"},
+            {"reason": "duplicate_canonical_query"},
+            {"reason": "private provider response"},
+        ], warnings=[])
+        clean = safe_coverage({"discovery": _discovery_diagnostics(pool)})
+        self.assertEqual(clean["discovery"]["rejection_reasons"], {
+            "city_only_membership_unconfirmed": 1, "duplicate_canonical_query": 1, "other": 1,
+        })
+        self.assertNotIn("private", json.dumps(clean))
+
     def test_allowlist_drops_private_and_malformed_fields(self):
         raw = {"quality_status": "partial", "prompt": "private-secret", "map_requests": True,
                "quality_reasons": ["incomplete_calendar", {"secret": 1}, "private-secret"],
