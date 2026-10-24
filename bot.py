@@ -43,7 +43,7 @@ from planner import (
     generate_itinerary,
 )
 from schemas import Itinerary, TripRequest
-from weather import CityResolutionError, get_weather
+from weather import CityResolutionError, get_weather, resolve_city_for_planning
 
 
 load_dotenv(override=True)
@@ -2896,6 +2896,24 @@ def start_generation(
                 return
         bot.send_message(chat_id, CITY_MVP_DISCLOSURE)
 
+    # Resolve the destination before quota or memory work. This server-owned
+    # result is carried into the worker; a map ambiguity never spends a turn.
+    resolved_city = None
+    if request.destination_kind == "city":
+        try:
+            resolved_city = resolve_city_for_planning(request.destination)
+        except CityResolutionError as error:
+            next_step = ("Повторите заполнение анкеты позже: /plan. "
+                         if error.reason in {"unavailable", "invalid_response"} else
+                         "Уточните направление в новой анкете: /plan. ")
+            bot.send_message(
+                chat_id,
+                f"{error}\nПопытка создания поездки не списана. "
+                "Новая поездка не сохранена. " + next_step
+                + "Платная генерация автоматически не запускается.",
+            )
+            return
+
     db.save_user(
         chat_id,
         name,
@@ -2955,7 +2973,10 @@ def start_generation(
 
         threading.Thread(
             target=generation_job,
-            **({"kwargs": {"access_grant": access_grant}} if access_grant is not None else {}),
+            kwargs={
+                **({"access_grant": access_grant} if access_grant is not None else {}),
+                **({"resolved_city": resolved_city} if resolved_city is not None else {}),
+            },
             args=(
                 chat_id,
                 user_id,
@@ -2985,6 +3006,7 @@ def generation_job(
     claim_id: Optional[str] = None,
     *,
     access_grant: Optional[str] = None,
+    resolved_city=None,
 ) -> None:
     import access_control
     from access_guard import operation
@@ -3036,6 +3058,8 @@ def generation_job(
             ground_candidates=request.destination_kind == "region",
             **({"city_candidates_first": True}
                if request.destination_kind == "city" and city_candidates_enabled() else {}),
+            **({"resolved_city": resolved_city}
+               if request.destination_kind == "city" and resolved_city is not None else {}),
         )
         if result.problems:
             bot.send_message(

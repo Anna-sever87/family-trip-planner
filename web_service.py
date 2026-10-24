@@ -34,7 +34,7 @@ from planner import (
     paid_interest_cost_warning,
 )
 from schemas import Itinerary, TripRequest
-from weather import CityResolutionError
+from weather import CityResolutionError, resolve_city_for_planning, safe_city_suggestions
 
 
 logger = logging.getLogger("web.service")
@@ -69,12 +69,17 @@ class TripDataError(ValueError):
     pass
 
 
+CITY_PREFLIGHT_CODES = frozenset({"city_ambiguous", "city_not_found", "city_unavailable", "city_invalid"})
+
+
 class TripCreateValidationError(ValueError):
     def __init__(self, message: str, *, diagnostic_problems: Optional[List[str]] = None,
-                 code: str = "validation") -> None:
+                 code: str = "validation", destination_options=()) -> None:
         self.diagnostic_problems = list(diagnostic_problems or [])
         self.code = code if code in {"insufficient_data", "search_limit", "invalid_request", "validation_error",
-                                    "unsupported_preferences"} else "validation"
+                                    "unsupported_preferences", *CITY_PREFLIGHT_CODES} else "validation"
+        self.destination_options = (safe_city_suggestions(destination_options)
+                                    if self.code == "city_ambiguous" else ())
         super().__init__(message)
 
 
@@ -707,6 +712,20 @@ def create_trip(tg_id: int, request: TripRequest, *, expected_account_key: Optio
             raise
         raise TripCreateValidationError(str(error)) from error
     reminders.get_days_before()
+    # Resolve before claiming an attempt or paid memory lookup. Never do HTTP
+    # in the queue's SQLite transaction. This server-only context is reused.
+    resolved_city = None
+    if normalized.destination_kind == "city":
+        try:
+            resolved_city = resolve_city_for_planning(normalized.destination)
+        except CityResolutionError as error:
+            code = {"ambiguous": "city_ambiguous", "not_found": "city_not_found",
+                    "context_mismatch": "city_not_found", "unavailable": "city_unavailable",
+                    "invalid_response": "city_unavailable"}.get(error.reason, "city_invalid")
+            raise TripCreateValidationError(
+                f"{error} Новая поездка не сохранена. Создание маршрута не запускалось; попытка не списана.",
+                code=code, destination_options=error.suggestions,
+            ) from error
     claim = db.claim_ai_request(
         tg_id,
         datetime.now(reminders.get_tz()).date(),
@@ -744,6 +763,7 @@ def create_trip(tg_id: int, request: TripRequest, *, expected_account_key: Optio
                 normalized,
                 memory_context=memory_context,
                 ground_candidates=normalized.destination_kind == "region",
+                **({"resolved_city": resolved_city} if resolved_city is not None else {}),
                 **({"city_candidates_first": True}
                    if normalized.destination_kind == "city" and city_candidates_enabled() else {}),
             )

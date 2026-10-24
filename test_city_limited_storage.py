@@ -121,6 +121,7 @@ class CityLimitedStorageTests(unittest.TestCase):
         self.result = planner.PlanResult(itinerary=self.itinerary, weather={}, attempts=1)
         self.result.city_map_context = city_fixture_context(self.request, self.itinerary)
         self.generate = self.stack.enter_context(patch.object(web_service, "generate_itinerary", return_value=self.result))
+        self.resolve = self.stack.enter_context(patch.object(web_service, "resolve_city_for_planning", return_value=object()))
         self.edit = self.stack.enter_context(patch.object(
             web_service, "edit_itinerary", side_effect=AssertionError("edit must be rejected before AI")))
 
@@ -171,7 +172,9 @@ class CityLimitedStorageTests(unittest.TestCase):
         self.assertEqual(len(db.list_trips(self.OWNER)), 1)
         self.assertEqual(db.get_ai_request_usage(self.OWNER, self.usage_date), 1)
         self.generate.assert_called_once()
-        self.assertEqual(self.generate.call_args.kwargs, {"memory_context": "", "ground_candidates": False})
+        self.assertEqual(self.generate.call_args.kwargs, {"memory_context": "", "ground_candidates": False,
+                                                        "resolved_city": self.resolve.return_value})
+        self.resolve.assert_called_once_with(self.request.destination)
         self.edit.assert_not_called()
 
     def test_bad_map_context_rejected_for_program_and_free_days_before_quota_claim(self):

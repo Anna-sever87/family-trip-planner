@@ -82,6 +82,7 @@ class BotAccessTests(unittest.TestCase):
             "_is_generation_active": Mock(return_value=False), "used_today": Mock(return_value=3), "DAILY_LIMIT": 3, "ask": Mock(),
             "_claim_route_ai_request": Mock(return_value=SimpleNamespace(status="ok", claim_id="claim")),
             "minimum_meal_cost": Mock(return_value=0), "city_candidates_enabled": Mock(return_value=False),
+            "resolve_city_for_planning": Mock(return_value=None),
             "_clean_memory_text": lambda text, _limit: text, "MAX_MANUAL_MEMORY_CHARS": 600, "MAX_FEEDBACK_CHARS": 600}
         self.ns["bot"].get_me.return_value = SimpleNamespace(username="SyntheticTravelBot")
         names = {"_private_actor", "_message_access_blocked", "handle_access_denied", "_callback_access_blocked",

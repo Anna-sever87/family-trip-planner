@@ -464,7 +464,7 @@ def main() -> None:
             bot_module.threading,
             "Thread",
             FakeThread,
-        ):
+        ), patch.object(bot_module, "resolve_city_for_planning", return_value=None):
             bot_module.start_generation(
                 message("/plan"),
                 dict(request_data),

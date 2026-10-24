@@ -51,6 +51,9 @@ class WebServiceOutcomeTests(unittest.TestCase):
         self.finish = self.mock(web_service, "_finish_ai_request_safely")
         self.edit = self.mock(web_service, "edit_itinerary", return_value=self.result)
         self.generate = self.mock(web_service, "generate_itinerary", return_value=self.result)
+        # This suite tests post-planner outcomes, not free geocoding; the latter
+        # has real-helper regressions in test_city_resolution_service.
+        self.mock(web_service, "resolve_city_for_planning", return_value=object())
         self.save = self.mock(web_service.db, "save_trip_bundle", return_value=9)
         self.update = self.mock(web_service.db, "update_trip_plan", return_value=True)
         self.delete = self.mock(web_service.db, "delete_trip")

@@ -15,6 +15,8 @@ const state = {
   createdTripId: null,
   generationReceipt: null,
   generationTimer: null,
+  cityClarification: null,
+  newTripFormRevision: 0,
   editingTrip: false,
   viewRevision: 0,
   stopEditWaiting: null,
@@ -34,7 +36,7 @@ const DESTINATION_KIND_COPY = Object.freeze({
   city: {
     label: "Город и страна",
     placeholder: "Например: Казань, Россия",
-    hint: "Для города маршрут планируется в городском радиусе.",
+    hint: "Укажите город и страну. Для одноимённых городов добавьте регион: Москва, Москва, Россия. Для городов-государств: Сингапур, Сингапур или Ватикан, Ватикан. Маршрут планируется в городском радиусе.",
     goal: "Познакомиться с городом",
     goalPlaceholder: "Например: познакомиться с городом и отдохнуть",
   },
@@ -532,6 +534,7 @@ async function api(path, options = {}) {
     const error = new Error(apiErrorMessage(payload, `Ошибка ${response.status}`));
     error.status = response.status;
     error.code = typeof payload?.code === "string" ? payload.code : payload?.detail?.code;
+    if (error.status === 422) error.clarification = payload?.detail?.clarification;
     if (isAccessDenied(error)) {
       error.message = ACCESS_DENIED_MESSAGE;
       markAccessDenied(account);
@@ -805,6 +808,7 @@ function createTripCard(trip) {
 
 function beginViewChange() {
   stopCoverUpdates();
+  state.cityClarification = null;
   state.viewRevision += 1;
   state.stopEditWaiting?.();
   $("editDialog").close();
@@ -1286,6 +1290,8 @@ function openNewTripDialog() {
     return;
   }
   state.createdTripId = null;
+  state.cityClarification = null;
+  state.newTripFormRevision += 1;
   clearGenerationReceipt(state.me, state.generationReceipt);
   $("savedTripNotice").hidden = true;
   const form = $("newTripForm");
@@ -1644,6 +1650,44 @@ async function applyGenerationStatus(result, account, receipt) {
   state.createdTripId = 0; // Re-submit requires the explicit opening of a NEW form.
   $("infoDialog").close();
   showSavedTripNotice(0, message);
+  if (result.status === "failed") showCityClarification(result.clarification, account, receipt);
+}
+
+// These buttons only restore/open a form. A new paid request always requires
+// the user's separate submit; the questionnaire never goes into localStorage.
+function showCityClarification(clarification, account, draft) {
+  if (state.me !== account || clarification?.kind !== "city" || clarification.attempt_used !== false) return;
+  const options = Array.isArray(clarification.options) ? [...new Set(clarification.options.slice(0, 10)
+    .filter((value) => typeof value === "string" && value.length <= 100
+      && value.split(",").length === 3
+      && value.split(",").every((part) => /[\p{L}\p{N}]/u.test(part))
+      && /^[\p{L}\p{M}\p{N} ,\-'’().–—]+$/u.test(value)))].slice(0, 5) : [];
+  const token = { account, formRevision: state.newTripFormRevision, viewRevision: state.viewRevision };
+  state.cityClarification = token;
+  const choose = (destination) => {
+    if (state.me !== account || state.cityClarification !== token || state.creatingTrip
+        || token.formRevision !== state.newTripFormRevision || token.viewRevision !== state.viewRevision) return;
+    const problem = routeAccessProblem();
+    if (problem) { toast(problem); return; }
+    const hasDraft = draft?.draftAvailable === true && draft.formRevision === state.newTripFormRevision;
+    state.cityClarification = null;
+    if (!hasDraft) openNewTripDialog();
+    else {
+      state.createdTripId = null;
+      $("infoDialog").showModal();
+    }
+    if (!$("infoDialog").open) return;
+    $("tripDestinationKind").value = "city";
+    syncDestinationKind();
+    if (destination) $("tripDestination").value = destination;
+    $("savedTripNotice").hidden = true;
+    $("newTripMessage").textContent = hasDraft
+      ? "Направление можно уточнить. Остальные поля анкеты сохранены. Проверьте их и нажмите кнопку создания, когда будете готовы."
+      : "Заполните остальные поля анкеты и нажмите кнопку создания, когда будете готовы. Автоматическая генерация не запускалась.";
+    $("tripDestination").focus();
+  };
+  for (const option of options) $("savedTripNotice").append(button(option, "button button-ghost", () => choose(option)));
+  $("savedTripNotice").append(button("Уточнить направление вручную", "button button-ghost", () => choose(null)));
 }
 
 async function pollGenerationReceipt(account, receipt) {
@@ -1684,7 +1728,9 @@ async function submitGenerationJob(payload, account) {
   }
   let receipt;
   try {
-    receipt = { key: crypto.randomUUID(), job_id: null, viewRevision: state.viewRevision };
+    state.cityClarification = null;
+    receipt = { key: crypto.randomUUID(), job_id: null, viewRevision: state.viewRevision,
+      draftAvailable: true, formRevision: state.newTripFormRevision };
     // If storage is denied, fail BEFORE sending a paid request.
     storeGenerationReceipt(receipt, account);
   } catch (_) {
@@ -1732,6 +1778,7 @@ async function submitNewTrip(event) {
   $("newTripMessage").textContent = "";
   const account = state.me;
   const viewRevision = state.viewRevision;
+  const draft = { draftAvailable: true, formRevision: state.newTripFormRevision };
   if (generationStorageKey(account)) {
     await submitGenerationJob(payload, account);
     return;
@@ -1760,6 +1807,12 @@ async function submitNewTrip(event) {
       $("newTripMessage").textContent = error.status
         ? error.message
         : "Не удалось получить ответ. Проверьте список поездок перед повторным запуском: маршрут мог сохраниться на сервере.";
+      if (error.status === 422 && error.clarification?.kind === "city") {
+        $("infoDialog").close();
+        state.createdTripId = 0;
+        showSavedTripNotice(0, error.message);
+        showCityClarification(error.clarification, account, draft);
+      }
     }
   } finally {
     stopWaiting();

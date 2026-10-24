@@ -95,6 +95,7 @@ class CityRolloutTests(unittest.TestCase):
                              "minimum_meal_cost": lambda request: 100,
                              "CITY_MVP_DISCLOSURE": city_rollout.CITY_MVP_DISCLOSURE,
                              "city_candidates_enabled": Mock(return_value=enabled),
+                             "resolve_city_for_planning": Mock(return_value=None),
                              "_reserve_generation_job": Mock(return_value=True),
                              "_claim_route_ai_request": Mock(side_effect=lambda *args: (
                                  events.append(("claim", None)) or SimpleNamespace(status="ok", claim_id="test"))),

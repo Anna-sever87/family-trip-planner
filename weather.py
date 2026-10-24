@@ -1,7 +1,9 @@
 """Погода для поездки через Open-Meteo: прогноз, а для дальних дат ориентир по прошлому году."""
 from datetime import date, timedelta
+from dataclasses import dataclass, field
 import math
 import time
+import unicodedata
 from typing import Any, Dict, Optional
 
 import httpx
@@ -24,14 +26,47 @@ UNKNOWN_WEATHER_NOTE = (
 )
 
 
+def safe_city_suggestions(value) -> tuple[str, ...]:
+    """Small plain-text geographic labels, never arbitrary provider messages."""
+    if not isinstance(value, (list, tuple)):
+        return ()
+    result = []
+    for label in value[:MAX_CITY_RESULTS]:
+        if not isinstance(label, str) or not 1 <= len(label) <= 100 or not label.isprintable():
+            continue
+        parts = label.split(",")
+        if len(parts) != 3:
+            continue
+        parts = [part.strip() for part in parts]
+        if any(not part or not any(char.isalnum() for char in part) or any(
+                not (unicodedata.category(char)[0] in "LMN" or char == " " or char in "-'’().–—")
+                for char in part) for part in parts):
+            continue
+        clean = ", ".join(parts)
+        if clean not in result and len(clean) <= 100:
+            result.append(clean)
+        if len(result) == 5:
+            break
+    return tuple(result)
+
+
 class CityResolutionError(ValueError):
     """A destination is not sufficiently unambiguous to anchor a city trip."""
 
-    def __init__(self, destination: str, *, reason: str):
+    def __init__(self, destination: str, *, reason: str, suggestions=()):
         self.reason = reason
+        self.suggestions = safe_city_suggestions(suggestions) if reason == "ambiguous" else ()
+        explanation = {
+            "ambiguous": "Найдено несколько одноимённых населённых пунктов.",
+            "not_found": "Указанный город не найден в географическом справочнике.",
+            "unavailable": "Сервис определения города временно недоступен. Попробуйте позже.",
+            "search_limit": "Поиск вернул ограниченную выборку; однозначность города не подтверждена.",
+            "invalid_response": "Сервис определения города вернул неподтверждённые данные.",
+        }.get(reason, "Не удалось однозначно определить город.")
         super().__init__(
-            f"Не удалось однозначно определить город «{destination}». "
-            "Уточните город, область/провинцию и страну; другой одноимённый город не подставляется."
+            explanation + " Уточните город, область/провинцию и страну; "
+            "другой одноимённый город не подставляется."
+            + ("\nВарианты для уточнения:\n" + "\n".join(self.suggestions) if self.suggestions else "")
         )
 
 
@@ -131,7 +166,20 @@ def find_city(destination: str) -> Optional[Dict[str, Any]]:
     if not matches:
         raise CityResolutionError(destination, reason="context_mismatch")
     if len(matches) > 1:
-        raise CityResolutionError(destination, reason="ambiguous")
+        labels = {}
+        for found in matches.values():
+            parts = [found.get(key) for key in ("name", "admin1", "country")]
+            if not all(isinstance(part, str) and part.strip() for part in parts):
+                continue
+            suggestions = safe_city_suggestions([", ".join(parts)])
+            if suggestions:
+                label = suggestions[0]
+                # Same-admin homonyms cannot be resolved by this label alone.
+                identity = tuple(_context_identity(part) for part in label.split(","))
+                labels.setdefault(identity, []).append(label)
+        raise CityResolutionError(destination, reason="ambiguous", suggestions=[
+            values[0] for values in labels.values() if len(values) == 1
+        ])
     if len(results) >= MAX_CITY_RESULTS:
         raise CityResolutionError(destination, reason="search_limit")
     found = next(iter(matches.values()))
@@ -139,6 +187,58 @@ def find_city(destination: str) -> Optional[Dict[str, Any]]:
             "country": found.get("country", ""),
             "country_code": found.get("country_code", ""), "admin1": found.get("admin1", ""),
             "geoname_id": found.get("id")}
+
+
+_CITY_CONTEXT_AUTHORITY = object()
+
+
+@dataclass(frozen=True, slots=True)
+class ResolvedPlanningCity:
+    """Opaque in-process preflight snapshot; never a client/persisted payload.
+
+    The immutable proof binds the exact snapshot and destination. Replacing
+    fields or supplying a dict cannot turn unverified coordinates into a city.
+    """
+    _destination: str
+    _record: tuple
+    _proof: tuple = field(repr=False, compare=False)
+
+
+def resolve_city_for_planning(destination: str) -> ResolvedPlanningCity:
+    """Free preflight, before any memory embedding, quota claim or generation."""
+    try:
+        city = find_city(destination)
+    except CityResolutionError:
+        raise
+    except httpx.HTTPError as error:
+        raise CityResolutionError(destination, reason="unavailable") from error
+    except (TypeError, ValueError) as error:
+        raise CityResolutionError(destination, reason="invalid_response") from error
+    if city is None:
+        raise CityResolutionError(destination, reason="not_found")
+    # find_city already checked provider identity, country, admin and bounds.
+    # Keep only scalar fields used downstream, never raw provider metadata.
+    keys = ("lat", "lon", "name", "country", "country_code", "admin1", "geoname_id")
+    record = tuple((key, city.get(key)) for key in keys)
+    if (any(type(city.get(key)) not in (int, float) or not math.isfinite(city[key])
+            or not -limit <= city[key] <= limit for key, limit in (("lat", 90), ("lon", 180)))
+            or not isinstance(city.get("name"), str) or not city["name"].strip()
+            or any(value is not None and type(value) not in (str, int, float) for _, value in record)):
+        raise CityResolutionError(destination, reason="invalid_response")
+    bound = destination.strip()
+    return ResolvedPlanningCity(bound, record, (_CITY_CONTEXT_AUTHORITY, bound, record))
+
+
+def validated_planning_city(context: ResolvedPlanningCity, destination: str) -> Dict[str, Any]:
+    """Return a fresh dict only for the original server-resolved destination."""
+    if (type(context) is not ResolvedPlanningCity or not isinstance(destination, str)
+            or type(context._proof) is not tuple or len(context._proof) != 3
+            or context._proof[0] is not _CITY_CONTEXT_AUTHORITY
+            or context._proof[1] != context._destination
+            or context._proof[2] is not context._record
+            or context._destination != destination.strip()):
+        raise CityResolutionError(destination, reason="invalid_context")
+    return dict(context._record)
 
 
 def _years_back(day: date, years: int = 1) -> date:

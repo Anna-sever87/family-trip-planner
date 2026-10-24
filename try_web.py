@@ -579,7 +579,7 @@ def main() -> None:
             assert page.text.count('aria-pressed="false"') >= 2
             assert 'aria-pressed="true"' in page.text
             assert "/static/styles.css?v=20261022-invite-access" in page.text
-            assert "/static/app.js?v=20261023-invite-five" in page.text
+            assert "/static/app.js?v=20261024-city-clarification" in page.text
             assert 'class="hero travel-hero"' in page.text
             assert "ИИ-иллюстрация путешествия" in page.text
             assert page.text.count("/static/favicon.svg?v=20261022-premium-travel") == 3
@@ -1114,6 +1114,7 @@ def main() -> None:
                     "generate_itinerary",
                     return_value=generated,
                 ) as generate_mock,
+                patch.object(web_service, "resolve_city_for_planning", return_value=None),
                 patch.object(
                     web_service,
                     "build_checklist",
@@ -1339,6 +1340,7 @@ def main() -> None:
                     "generate_itinerary",
                     return_value=free_generated,
                 ) as free_generate_mock,
+                patch.object(web_service, "resolve_city_for_planning", return_value=None),
                 patch.object(
                     web_service,
                     "build_checklist",
@@ -1476,6 +1478,7 @@ def main() -> None:
                     "get_weather",
                     return_value=None,
                 ),
+                patch.object(web_service, "resolve_city_for_planning", return_value=None),
                 patch.object(
                     planner,
                     "weather_summary",
@@ -1647,6 +1650,7 @@ def main() -> None:
                         problems=["День 1: повторяется место."],
                     ),
                 ),
+                patch.object(web_service, "resolve_city_for_planning", return_value=None),
                 patch.object(
                     web_service,
                     "build_checklist",
@@ -1700,6 +1704,7 @@ def main() -> None:
                     "generate_itinerary",
                     side_effect=RuntimeError("offline AI"),
                 ),
+                patch.object(web_service, "resolve_city_for_planning", return_value=None),
                 patch.object(
                     web_service,
                     "build_checklist",
@@ -1778,6 +1783,7 @@ def main() -> None:
                         "AI не должен вызываться при busy или limit"
                     ),
                 ) as guarded_generate,
+                patch.object(web_service, "resolve_city_for_planning", return_value=None),
             ):
                 busy_create = guard_client.post(
                     "/api/trips",

@@ -25,6 +25,7 @@ with patch("dotenv.load_dotenv", return_value=False):
     import web_service
 from fastapi.testclient import TestClient
 from schemas import Itinerary, ItineraryDay, TripRequest
+from weather import CityResolutionError
 
 REAL_CREATE_TRIP = web_service.create_trip
 REAL_CLAIM = db.claim_ai_request
@@ -167,6 +168,24 @@ class GenerationJobsTests(unittest.TestCase):
         self.assertEqual(before[0]["id"], trip_id)
         self.assertEqual(self.rows("generation_jobs"), [])
 
+    def test_destination_options_migration_preserves_legacy_receipt_and_trip(self):
+        status = self.finish_saved()
+        before_trips = self.rows("trips")
+        before_checklist = self.rows("checklist_items")
+        with db.connect() as connection:
+            # Recreate the immediately previous schema, not an empty database.
+            connection.execute("ALTER TABLE generation_jobs DROP COLUMN destination_options_json")
+        legacy = self.rows("generation_jobs")
+        db.init_db()
+        db.init_db()
+        after = self.rows("generation_jobs")
+        self.assertEqual(len(after), 1)
+        self.assertEqual(after[0].pop("destination_options_json"), "[]")
+        self.assertEqual(after, legacy)
+        self.assertEqual(self.rows("trips"), before_trips)
+        self.assertEqual(self.rows("checklist_items"), before_checklist)
+        self.assertEqual(jobs.get_job(1, self.account, job_id=status["job_id"]), status)
+
     def test_concurrent_same_key_claims_exactly_once_without_quota_before_worker(self):
         with ThreadPoolExecutor(max_workers=8) as callers:
             results = list(callers.map(lambda _: self.submit(), range(12)))
@@ -201,7 +220,8 @@ class GenerationJobsTests(unittest.TestCase):
         self.assertNotIn(self.request.wishes, raw)
         self.assertNotIn(self.request.destination, raw)
         self.assertEqual(set(self.rows("generation_jobs")[0]), {"job_id", "tg_id", "account_key", "idempotency_key",
-                         "request_digest", "status", "trip_id", "failure_code", "created_at", "finished_at"})
+                         "request_digest", "status", "trip_id", "failure_code", "destination_options_json",
+                         "created_at", "finished_at"})
 
     def test_success_trip_and_receipt_commit_together_and_replay_never_calls_worker(self):
         status = self.finish_saved()
@@ -249,7 +269,8 @@ class GenerationJobsTests(unittest.TestCase):
         self.assertEqual(jobs.get_job(1, self.account, key=self.key)["status"], "failed")
 
     def test_failure_messages_are_allowlisted_including_insufficient_data(self):
-        for code in ("insufficient_data", "search_limit", "invalid_request", "validation_error", "unsupported_preferences", "private-secret"):
+        for code in ("insufficient_data", "search_limit", "invalid_request", "validation_error", "unsupported_preferences",
+                     "city_ambiguous", "city_not_found", "city_unavailable", "city_invalid", "private-secret"):
             with self.subTest(code=code):
                 key = str(uuid4())
                 self.worker.side_effect = web_service.TripCreateValidationError("secret-raw", code=code,
@@ -260,6 +281,86 @@ class GenerationJobsTests(unittest.TestCase):
                 self.assertEqual(status["status"], "failed")
                 self.assertEqual(status["message"], jobs.MESSAGES[code if code in jobs.MESSAGES else "validation"])
                 self.assertNotIn("secret", json.dumps(status))
+
+    def test_actual_city_preflight_failure_persists_options_without_quota_or_memory(self):
+        options = ("Москва, Москва, Россия", "Москва, Тверская область, Россия")
+        self.worker.side_effect = REAL_CREATE_TRIP
+        with patch.object(web_service, "resolve_city_for_planning", side_effect=CityResolutionError(
+                "private-destination", reason="ambiguous", suggestions=options)) as resolve, \
+                patch.object(web_service.vector_memory, "recall_family_memories",
+                             side_effect=AssertionError("Memory must follow city preflight")) as recall, \
+                patch.object(web_service, "generate_itinerary",
+                             side_effect=AssertionError("Generation must follow city preflight")) as model:
+            queued = self.submit()
+            resolve.assert_not_called()  # No external lookup in queue transaction.
+            self.manager.executor.run_next()
+            status = jobs.get_job(1, self.account, job_id=queued["job_id"])
+            self.assertEqual(status["status"], "failed")
+            self.assertEqual(status["clarification"], {"kind": "city", "options": list(options), "attempt_used": False})
+            self.assertEqual(status["message"], jobs.MESSAGES["city_ambiguous"])
+            self.assertEqual(self.submit(), status)
+            self.assertEqual(self.manager.executor.calls, [])
+            resolve.assert_called_once_with(self.request.destination)
+            recall.assert_not_called()
+            model.assert_not_called()
+        self.claim.assert_not_called()
+        self.worker.assert_called_once()
+        self.assertEqual(self.rows("ai_requests"), [])
+        self.assertEqual(self.rows("access_route_attempts"), [])
+        self.assertEqual(self.rows("trips"), [])
+        row = self.rows("generation_jobs")[0]
+        self.assertEqual(json.loads(row["destination_options_json"]), list(options))
+        self.assertNotIn("private-destination", json.dumps(row))
+
+    def test_clarification_is_sanitized_owner_bound_and_survives_restart_without_rerun(self):
+        options = ["Москва, Москва, Россия", "Москва, Тверская область, Россия"]
+        supplied = [options[0], "<script>, Province, Country", "City, Province\nX, Country",
+                    "https://secret.test, Province, Country", {"secret": "private"}, "A" * 101,
+                    options[1], options[0]]
+        self.worker.side_effect = web_service.TripCreateValidationError(
+            "private-raw-error", code="city_ambiguous", destination_options=supplied)
+        receipt = self.submit()
+        self.manager.executor.run_next()
+        status = jobs.get_job(1, self.account, job_id=receipt["job_id"])
+        self.assertEqual(status["clarification"]["options"], options)
+        self.assertEqual(json.loads(self.rows("generation_jobs")[0]["destination_options_json"]), options)
+        for identifier in ({"job_id": receipt["job_id"]}, {"key": self.key}):
+            for owner, account in ((2, db.get_account_key(2)), (1, db.get_account_key(2))):
+                with self.subTest(owner=owner, identifier=identifier), self.assertRaises(jobs.JobNotFoundError):
+                    jobs.get_job(owner, account, **identifier)
+        replacement = jobs.GenerationJobs(executor_factory=DeferredExecutor)
+        replacement.start()
+        self.addCleanup(replacement.close)
+        self.assertEqual(replacement.submit(1, self.account, self.key, self.request), status)
+        self.assertEqual(replacement.executor.calls, [])
+        self.assertNotIn("private", json.dumps(self.rows("generation_jobs"), ensure_ascii=False))
+        self.worker.assert_called_once()
+        self.claim.assert_not_called()
+
+    def test_clarification_revalidates_persisted_options_and_never_applies_to_other_failures(self):
+        self.worker.side_effect = web_service.TripCreateValidationError("ignored", code="city_ambiguous")
+        receipt = self.submit()
+        self.manager.executor.run_next()
+        for raw in ("not-json", '{"raw":"secret"}', "[" + " " * 4096 + "]",
+                    '["<b>unsafe</b>, Province, Country", 1, null]'):
+            with self.subTest(raw=raw[:30]), db.connect() as connection:
+                connection.execute("UPDATE generation_jobs SET destination_options_json=? WHERE job_id=?",
+                                   (raw, receipt["job_id"]))
+            self.assertEqual(jobs.get_job(1, self.account, job_id=receipt["job_id"])["clarification"]["options"], [])
+        with db.connect() as connection:
+            connection.execute("UPDATE generation_jobs SET failure_code='validation', destination_options_json=? WHERE job_id=?",
+                               (json.dumps(["Москва, Москва, Россия"]), receipt["job_id"]))
+        self.assertNotIn("clarification", jobs.get_job(1, self.account, job_id=receipt["job_id"]))
+
+    def test_clarification_keeps_at_most_five_unique_plain_text_options(self):
+        options = [f"City {index}, Province, Country" for index in range(8)]
+        self.worker.side_effect = web_service.TripCreateValidationError("ignored", code="city_ambiguous",
+                                                                      destination_options=options)
+        self.submit()
+        self.manager.executor.run_next()
+        status = jobs.get_job(1, self.account, key=self.key)
+        self.assertEqual(status["clarification"]["options"], options[:5])
+        self.assertEqual(json.loads(self.rows("generation_jobs")[0]["destination_options_json"]), options[:5])
 
     def test_generic_error_contains_no_exception_text(self):
         self.worker.side_effect = RuntimeError("SECRET_token=fixture personal-model-text")
@@ -497,6 +598,7 @@ class GenerationJobsTests(unittest.TestCase):
         result = SimpleNamespace(itinerary=self.itinerary, problems=[], weather=[], weather_text="",
                                  attempts=1, prompt_tokens=10, completion_tokens=20, total_tokens=30)
         with patch.object(web_service, "generate_itinerary", return_value=result) as model, \
+                patch.object(web_service, "resolve_city_for_planning", return_value=object()) as resolve, \
                 patch.object(web_service.vector_memory, "recall_family_memories", return_value=[]), \
                 patch.object(web_service, "_save_trip_memory_safely", return_value=0), \
                 patch.object(web_service, "_daily_ai_limit", return_value=5):
@@ -510,6 +612,7 @@ class GenerationJobsTests(unittest.TestCase):
             self.assertEqual(self.submit(), status)
             model.assert_called_once()
             self.claim.assert_called_once()
+            resolve.assert_called_once_with(self.request.destination)
             self.assertNotIn("tokens", json.dumps(status))
 
     def test_actual_thread_executor_has_two_inflight_slots_and_no_third_queued_task(self):

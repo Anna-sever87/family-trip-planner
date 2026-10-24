@@ -631,6 +631,7 @@ def init_db() -> None:
                 status TEXT NOT NULL CHECK(status IN ('queued','running','succeeded','failed','interrupted')),
                 trip_id INTEGER,
                 failure_code TEXT NOT NULL DEFAULT '',
+                destination_options_json TEXT NOT NULL DEFAULT '[]',
                 created_at TEXT NOT NULL,
                 finished_at TEXT,
                 UNIQUE(account_key, idempotency_key),
@@ -641,6 +642,8 @@ def init_db() -> None:
         """)
         conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_generation_jobs_active_account "
                      "ON generation_jobs(account_key) WHERE status IN ('queued','running')")
+        if "destination_options_json" not in _column_names(conn, "generation_jobs"):
+            conn.execute("ALTER TABLE generation_jobs ADD COLUMN destination_options_json TEXT NOT NULL DEFAULT '[]'")
 
         violation = conn.execute(
             "PRAGMA foreign_key_check"

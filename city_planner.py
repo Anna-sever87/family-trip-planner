@@ -30,7 +30,8 @@ from program_coverage import rebuild_program_report
 from prompts import build_itinerary_prompt, build_itinerary_system_prompt
 from rules import check_city_radius, check_program_depth, check_rules, check_verified_place_duplicates
 from schemas import INTEREST_LABELS, Itinerary, ItineraryDay, TripRequest
-from weather import CityResolutionError, RAIN_MM, find_city, get_weather, weather_summary
+from weather import (CityResolutionError, ResolvedPlanningCity, RAIN_MM, find_city,
+                     get_weather, validated_planning_city, weather_summary)
 from yandex_ai import YandexAIError
 
 
@@ -226,7 +227,8 @@ def _incompatible_same_day_pairs(candidates) -> list[dict]:
 
 
 def generate_city_itinerary(request: TripRequest, *, max_attempts: int = 3,
-                            memory_context: str = "", completion):
+                            memory_context: str = "", completion,
+                            resolved_city: ResolvedPlanningCity | None = None):
     # Lazy import keeps the opt-in entry point from changing legacy planner
     # imports or introducing a circular dependency at module initialization.
     import planner
@@ -246,7 +248,8 @@ def generate_city_itinerary(request: TripRequest, *, max_attempts: int = 3,
             )
 
     canonical_schema = planner.build_itinerary_json_schema(request)
-    center = find_city(request.destination)
+    center = (validated_planning_city(resolved_city, request.destination)
+              if resolved_city is not None else find_city(request.destination))
     if center is None:
         raise CityResolutionError(request.destination, reason="not_found")
     weather = get_weather(request.destination, request.start_date, request.end_date,

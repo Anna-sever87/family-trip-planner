@@ -506,7 +506,9 @@ test("region hint and route header disclose the lake shoreline margin without ch
   assert.ok(elementText(ui.element("tripHeader")).includes(hint));
   ui.element("tripDestinationKind").value = "city";
   ui.context.syncDestinationKind();
-  assert.equal(ui.element("tripDestinationHint").textContent, "Для города маршрут планируется в городском радиусе.");
+  assert.match(ui.element("tripDestinationHint").textContent, /Маршрут планируется в городском радиусе/);
+  assert.match(ui.element("tripDestinationHint").textContent, /Москва, Москва, Россия/);
+  assert.match(ui.element("tripDestinationHint").textContent, /Сингапур, Сингапур.*Ватикан, Ватикан/);
   ui.state.trip.request.destination_kind = "city";
   ui.context.renderTripHeader();
   assert.ok(!elementText(ui.element("tripHeader")).includes("береговая зона"));
@@ -1415,6 +1417,107 @@ function jobsBrowser(storage = new Map(), owner = "a".repeat(64)) {
 function jobStatus(status = "running", tripId = null) {
   return { job_id: JOB_ID, status, trip_id: tripId, message: `Состояние: ${status}. Без повторной генерации.` };
 }
+
+function ambiguousCityStatus() {
+  return { ...jobStatus("failed"), clarification: { kind: "city", attempt_used: false,
+    options: ["Москва, Москва, Россия", "Москва, Тверская область, Россия"] } };
+}
+
+test("city choice restores the draft but never submits or stores its private fields", async () => {
+  const ui = jobsBrowser();
+  let posts = 0;
+  ui.element("tripDestination").value = "Москва, Россия";
+  ui.element("tripWishes").value = "Личные пожелания";
+  ui.context.api = async (_url, options) => { assert.equal(options?.method, "POST"); posts += 1; return ambiguousCityStatus(); };
+  await ui.context.submitNewTrip({ preventDefault() {} });
+  assert.equal(ui.storage.size, 0);
+  assert.equal(ui.state.createdTripId, 0);
+  const choice = ui.element("savedTripNotice").children.find((el) => el.textContent === "Москва, Москва, Россия");
+  assert.ok(choice);
+  choice.dispatch("click");
+  assert.equal(ui.element("tripDestination").value, "Москва, Москва, Россия");
+  assert.equal(ui.element("tripWishes").value, "Личные пожелания");
+  assert.equal(ui.element("infoDialog").open, true);
+  assert.equal(ui.state.createdTripId, null);
+  assert.equal(posts, 1);
+  assert.equal(ui.storage.size, 0);
+  choice.dispatch("click");
+  assert.equal(posts, 1);
+  await ui.context.submitNewTrip({ preventDefault() {} });
+  assert.equal(posts, 2, "only the explicit submit starts another job");
+});
+
+test("recovered city clarification opens a fresh form without claiming to restore a lost draft", async () => {
+  const storage = new Map([[`family-trip-generation:${"a".repeat(64)}`, JSON.stringify({ key: JOB_KEY, job_id: JOB_ID })]]);
+  const ui = jobsBrowser(storage);
+  let gets = 0;
+  ui.context.api = async (_url, options) => { assert.equal(options, undefined); gets += 1; return ambiguousCityStatus(); };
+  await ui.context.resumeGenerationReceipt();
+  ui.element("tripWishes").value = "Нельзя считать это сохранённой анкетой";
+  ui.element("savedTripNotice").children.find((el) => el.textContent === "Москва, Москва, Россия").dispatch("click");
+  assert.equal(gets, 1);
+  assert.equal(ui.element("tripWishes").value, "");
+  assert.equal(ui.element("tripDestination").value, "Москва, Москва, Россия");
+  assert.match(ui.element("newTripMessage").textContent, /Заполните остальные поля/);
+});
+
+for (const invalidate of ["form", "view", "account", "logout"]) {
+  test(`old city buttons cannot overwrite a changed ${invalidate}`, async () => {
+    const ui = jobsBrowser();
+    ui.context.api = async () => ambiguousCityStatus();
+    await ui.context.submitNewTrip({ preventDefault() {} });
+    const choice = ui.element("savedTripNotice").children.find((el) => el.textContent === "Москва, Москва, Россия");
+    if (invalidate === "form") ui.context.openNewTripDialog();
+    if (invalidate === "view") ui.context.beginViewChange();
+    if (invalidate === "account") ui.state.me = { ...ui.state.me };
+    if (invalidate === "logout") await ui.context.logout();
+    ui.element("tripDestination").value = "Новая анкета";
+    choice.dispatch("click");
+    assert.equal(ui.element("tripDestination").value, "Новая анкета");
+  });
+}
+
+test("city options are filtered and unavailable lookup has only a manual edit action", async () => {
+  const ui = jobsBrowser();
+  const result = ambiguousCityStatus();
+  result.clarification.options = ["<img>, X, Y", "https://evil.test, X, Y", "Москва, Москва, Россия", "Москва, Москва, Россия", "Bad\nName, X, Y"];
+  ui.context.api = async () => result;
+  await ui.context.submitNewTrip({ preventDefault() {} });
+  let actions = ui.element("savedTripNotice").children.filter((el) => el.tagName === "BUTTON");
+  assert.equal(actions.length, 2);
+  assert.equal(actions[0].textContent, "Москва, Москва, Россия");
+  ui.context.openNewTripDialog();
+  ui.context.api = async () => ({ ...ambiguousCityStatus(), clarification: { kind: "city", attempt_used: false, options: [] } });
+  await ui.context.submitNewTrip({ preventDefault() {} });
+  actions = ui.element("savedTripNotice").children.filter((el) => el.tagName === "BUTTON");
+  assert.equal(actions.length, 1);
+  assert.match(actions[0].textContent, /вручную/);
+});
+
+test("clarification is not offered for interrupted or generic paid failures", async () => {
+  for (const result of [ { ...ambiguousCityStatus(), status: "interrupted" },
+    { ...ambiguousCityStatus(), clarification: { kind: "city", attempt_used: true, options: [] } }, jobStatus("failed") ]) {
+    const ui = jobsBrowser();
+    ui.context.api = async () => result;
+    await ui.context.submitNewTrip({ preventDefault() {} });
+    assert.equal(ui.element("savedTripNotice").children.filter((el) => el.tagName === "BUTTON").length, 0);
+  }
+});
+
+test("legacy endpoint passes structured city clarification without another POST", async () => {
+  const ui = creationBrowser();
+  let calls = 0;
+  ui.context.fetch = async () => { calls += 1; return { ok: false, status: 422,
+    headers: new Headers({ "content-type": "application/json" }),
+    json: async () => ({ detail: { message: "Уточните город, попытка не списана", code: "city_ambiguous",
+      clarification: ambiguousCityStatus().clarification } }) }; };
+  await ui.context.submitNewTrip({ preventDefault() {} });
+  const choice = ui.element("savedTripNotice").children.find((el) => el.textContent === "Москва, Москва, Россия");
+  assert.ok(choice);
+  choice.dispatch("click");
+  assert.equal(calls, 1);
+  assert.equal(ui.element("tripDestination").value, "Москва, Москва, Россия");
+});
 
 test("durable job POST stores only account-bound receipt and blocks repeated submit", async () => {
   const ui = jobsBrowser();

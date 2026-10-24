@@ -72,9 +72,11 @@ from schemas import (
 )
 from weather import (
     CityResolutionError,
+    ResolvedPlanningCity,
     RAIN_MM,
     find_city,
     get_weather,
+    validated_planning_city,
     weather_summary,
 )
 from yandex_ai import (
@@ -4964,15 +4966,21 @@ def generate_itinerary(
     memory_context: str = "",
     ground_candidates: bool = False,
     city_candidates_first: bool = False,
+    resolved_city: Optional[ResolvedPlanningCity] = None,
 ) -> PlanResult:
     """Составляет маршрут и проверяет его."""
 
+    if resolved_city is not None and request.destination_kind != "city":
+        raise CityResolutionError(request.destination, reason="invalid_context")
+    preflight_city = (validated_planning_city(resolved_city, request.destination)
+                      if resolved_city is not None else None)
     if city_candidates_first:
         # City rollout and deterministic scheduling are separate switches.
         # Neither mode changes the established regional/source-backed branch.
         from city_planner import generate_city_itinerary
         return generate_city_itinerary(request, max_attempts=max_attempts,
-                                       memory_context=memory_context, completion=generate_json)
+                                       memory_context=memory_context, completion=generate_json,
+                                       **({"resolved_city": resolved_city} if resolved_city is not None else {}))
 
     if max_attempts < 1:
         raise ValueError(
@@ -4994,6 +5002,7 @@ def generate_itinerary(
     weather = (
         None if region_scope is not None else get_weather(
             request.destination, request.start_date, request.end_date,
+            **({"resolved_city": preflight_city} if preflight_city is not None else {}),
         )
     )
     weather_text = (
@@ -5030,7 +5039,7 @@ def generate_itinerary(
         )
 
     try:
-        city = find_city(request.destination) if region_scope is None else None
+        city = (preflight_city if preflight_city is not None else find_city(request.destination)) if region_scope is None else None
     except CityResolutionError:
         raise  # An ambiguous city must not silently remove geographic checks.
     except Exception:

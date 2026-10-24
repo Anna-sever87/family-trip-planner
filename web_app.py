@@ -456,9 +456,16 @@ async def create_trip(
         ) from error
     except web_service.TripCreateValidationError as error:
         _log_validation_rejection(error, stage="create_validation")
+        detail = str(error)
+        if error.code in web_service.CITY_PREFLIGHT_CODES:
+            detail = {
+                "message": generation_jobs.MESSAGES[error.code], "code": error.code,
+                "clarification": {"kind": "city", "options": list(error.destination_options),
+                                  "attempt_used": False},
+            }
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail=str(error),
+            detail=detail,
         ) from error
     except web_service.TripSavedResponseError as error:
         logger.exception("Не удалось показать сохранённую поездку %s", error.trip_id)

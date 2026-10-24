@@ -2,6 +2,8 @@
 
 The single web process owns two in-flight slots, with no unbounded work queue.
 Only a request digest is stored. The request itself lives in the worker closure.
+On geographic ambiguity, at most five sanitized public place labels are kept
+for owner-bound clarification, never the questionnaire or raw provider response.
 Trip/receipt commit is atomic in db.save_trip_bundle. Old pending receipts are
 interrupted on web startup, not automatically retried. Status is owner-bound
 and contains no request, prompts, model output, private memory or token counts.
@@ -21,6 +23,7 @@ import web_service
 from generation_quality import KEY as QUALITY_KEY, safe_coverage
 from schemas import TripRequest
 from yandex_ai import YandexAIError
+from weather import safe_city_suggestions
 
 
 MAX_WORKERS = 2
@@ -32,6 +35,10 @@ MESSAGES = {
     "account_change": "Обработка остановлена из-за изменения состояния аккаунта. Генерация по этой заявке не запускалась автоматически повторно. Проверьте список поездок перед новым запуском.",
     "validation": "Маршрут не прошёл обязательные проверки. Новая поездка не сохранена; повторная генерация автоматически не запускалась.",
     "validation_error": "Маршрут не прошёл обязательные проверки. Новая поездка не сохранена; повторная генерация автоматически не запускалась.",
+    "city_ambiguous": "Найдено несколько одноимённых населённых пунктов. Выберите нужный вариант или уточните город, регион и страну. Создание маршрута не запускалось; попытка не списана.",
+    "city_not_found": "Не удалось подтвердить город в указанной стране и регионе. Проверьте название направления. Создание маршрута не запускалось; попытка не списана.",
+    "city_unavailable": "Сервис определения города временно недоступен или вернул некорректный ответ. Создание маршрута не запускалось; попытка не списана. Автоматического повтора нет.",
+    "city_invalid": "Нужно уточнить направление в формате «город, регион, страна». Создание маршрута не запускалось; попытка не списана.",
     "insufficient_data": "Недостаточно подтверждённых данных для программы по этим условиям. Новая поездка не сохранена. Это не означает, что подходящих мест нет.",
     "search_limit": "Достигнут предел проверки доступных данных. Новая поездка не сохранена; автоматического повторного запуска нет.",
     "invalid_request": "Условия поездки требуют уточнения. Новая поездка не сохранена; повторная генерация автоматически не запускалась.",
@@ -102,9 +109,20 @@ def public_status(row, conn=None):
                                "Откройте поездку: там указаны ограничения. Повторный запуск не требуется.")
             except (ValueError, TypeError, AttributeError):
                 pass  # Saved result remains available; do not expose damaged/private data.
-    return {"job_id": row["job_id"], "status": state,
+    payload = {"job_id": row["job_id"], "status": state,
             "trip_id": row["trip_id"] if state == "succeeded" else None,
             "message": message}
+    if state == "failed" and code in web_service.CITY_PREFLIGHT_CODES:
+        options = ()
+        if code == "city_ambiguous":
+            raw = row["destination_options_json"] if "destination_options_json" in row.keys() else "[]"
+            if isinstance(raw, str) and len(raw) <= 4096:
+                try:
+                    options = safe_city_suggestions(json.loads(raw))
+                except (ValueError, TypeError):
+                    pass
+        payload["clarification"] = {"kind": "city", "options": list(options), "attempt_used": False}
+    return payload
 
 
 def get_job(tg_id, account_key, *, job_id=None, key=None):
@@ -203,11 +221,13 @@ class GenerationJobs:
         return get_job(tg_id, account_key, job_id=job_id)
 
     @staticmethod
-    def _finish(job_id, state, code):
+    def _finish(job_id, state, code, destination_options=()):
+        options = safe_city_suggestions(destination_options) if state == "failed" and code == "city_ambiguous" else ()
         with db.connect() as conn:
             # Atomic successful save wins over a later rendering/memory error.
-            conn.execute("UPDATE generation_jobs SET status=?, failure_code=?, finished_at=? "
-                         "WHERE job_id=? AND status IN ('queued','running')", (state, code, db._now(), job_id))
+            conn.execute("UPDATE generation_jobs SET status=?, failure_code=?, finished_at=?, destination_options_json=? "
+                         "WHERE job_id=? AND status IN ('queued','running')",
+                         (state, code, db._now(), json.dumps(options, ensure_ascii=False), job_id))
 
     def _run(self, job_id, tg_id, account_key, request, access_grant=None):
         try:
@@ -229,8 +249,9 @@ class GenerationJobs:
             except web_service.TripCreateValidationError as error:
                 code = getattr(error, "code", "validation")
                 self._finish(job_id, "failed", code if code in {
-                    "insufficient_data", "search_limit", "invalid_request", "validation_error", "unsupported_preferences"
-                } else "validation")
+                    "insufficient_data", "search_limit", "invalid_request", "validation_error", "unsupported_preferences",
+                    *web_service.CITY_PREFLIGHT_CODES,
+                } else "validation", getattr(error, "destination_options", ()))
             except web_service.AIDailyLimitError:
                 self._finish(job_id, "failed", "limit")
             except web_service.EditBusyError:

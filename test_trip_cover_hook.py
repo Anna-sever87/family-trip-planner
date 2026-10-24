@@ -32,6 +32,7 @@ class TripCoverHookTests(unittest.TestCase):
         result = SimpleNamespace(itinerary=itinerary, problems=[], weather=[], weather_text="",
                                  attempts=1, prompt_tokens=10, completion_tokens=10, total_tokens=20)
         self.generate = self.stack.enter_context(patch.object(web_service, "generate_itinerary", return_value=result))
+        self.stack.enter_context(patch.object(web_service, "resolve_city_for_planning", return_value=object()))
         self.stack.enter_context(patch.object(web_service.vector_memory, "recall_family_memories", return_value=[]))
         self.stack.enter_context(patch.object(web_service, "_save_trip_memory_safely", return_value=0))
         self.stack.enter_context(patch.object(web_service, "_daily_ai_limit", return_value=20))
