@@ -22,7 +22,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 import places
 from destination_scope import (
     REGION_BASE_RADIUS_KM, RegionScope, region_margin_km,
-    _distance_from_bounds, _valid_geometry,
+    _distance_from_bounds, _valid_geometry, canonical_region_base_query,
 )
 from destination_name_hints import destination_name_hints
 from rules import is_generic_attraction
@@ -802,7 +802,7 @@ def ground_region_candidates(
         proposal = proposed_bases.get(base_key)
         if proposal is None:
             continue
-        query = proposal.base_query
+        query = canonical_region_base_query(proposal.base_query, scope)
         key = places._normalized_label(query)
         if not _query_parts(query, scope.country):
             reason = "invalid_base_context"

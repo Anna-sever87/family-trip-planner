@@ -77,6 +77,50 @@ def resolve_region(destination: str) -> RegionScope:
                        record["geojson"], area_type=record["type"])
 
 
+def canonical_region_base_query(query: str, scope: RegionScope) -> str:
+    """Use the bound map region's spelling for one equivalent admin qualifier.
+
+    Russian republic names may be written with or without «Республика».
+    This is NOT a global name alias: only the middle part of a three-part
+    local-base query is eligible, only in the already resolved RU administrative
+    region with a full polygon. City/POI names, other provinces and countries
+    remain exact. The resulting query still goes through the normal strict
+    map matcher, base-type and complete geographic-boundary checks.
+    """
+    if (not isinstance(query, str) or query != query.strip() or not query.isprintable()
+            or not isinstance(scope, RegionScope)
+            or scope.area_type not in {"administrative", "state", "region"}
+            or places._country_identity(scope.country) != ("ru",)
+            or not _valid_geometry(scope.geometry)
+            or not isinstance(scope.name, str) or not scope.name.isprintable()):
+        return query
+    parts = [part.strip() for part in query.split(",")]
+    region_parts = [part.strip() for part in scope.name.split(",")]
+    if (len(parts) != 3 or not all(parts) or len(region_parts) < 2
+            or places._country_identity(parts[-1]) != ("ru",)
+            or places._country_identity(region_parts[-1]) != ("ru",)):
+        return query
+    canonical = region_parts[0]
+    if not 1 <= len(canonical) <= 120:
+        return query
+    qualifier = parts[1]
+    if places._identity_words(qualifier) == places._identity_words(canonical):
+        return query
+    def republic_core(value: str) -> tuple[str, ...]:
+        words = places._identity_words(value)
+        return words[1:] if words[:1] == ("республика",) else words
+    if (republic_core(qualifier) and republic_core(qualifier) == republic_core(canonical)
+            and (places._identity_words(qualifier)[:1] == ("республика",)
+                 or places._identity_words(canonical)[:1] == ("республика",))):
+        # Do not change even the spelling/spacing of the local base or country.
+        raw_parts = query.split(",")
+        before = raw_parts[1][:len(raw_parts[1]) - len(raw_parts[1].lstrip())]
+        after = raw_parts[1][len(raw_parts[1].rstrip()):]
+        result = ",".join((raw_parts[0], before + canonical + after, raw_parts[2]))
+        return result if len(result) <= 120 else query
+    return query
+
+
 def build_region_context(scope: RegionScope) -> dict:
     """Краткие факты карты для prompt; не создаёт базы и не обращается к сети.
 
@@ -333,6 +377,7 @@ def check_region_itinerary(
                 if scope.country and base_country != places._country_identity(scope.country)
                 else base
             )
+            query = canonical_region_base_query(query, scope)
             try:
                 base_place = places.geocode(query)
             except (places.GeocodeUnavailable, places.GeocodeMismatch):
