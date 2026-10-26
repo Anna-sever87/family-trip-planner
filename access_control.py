@@ -12,7 +12,7 @@ import os
 import re
 import secrets
 import sqlite3
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 from uuid import uuid4
 
@@ -65,6 +65,32 @@ def is_owner(tg_id: int) -> bool:
     except AccessDeniedError:
         return False
     return tg_id in _owner_ids()
+
+
+def owner_test_claim_ids(day: str) -> tuple[str, ...]:
+    """Read a dated, server-only list of authorised owner test attempts.
+
+    This is not a user preference or a refund API. The list never deletes a
+    ledger row, changes a limit or exempts a guest. Callers independently bind
+    every ID to their owner/day records. Malformed configuration grants none.
+    """
+    raw = os.getenv("OWNER_TEST_ROUTE_EXEMPTIONS", "")
+    if not isinstance(day, str) or not isinstance(raw, str) or len(raw) > 10240 or not raw.isascii():
+        return ()
+    try:
+        if date.fromisoformat(day).isoformat() != day:
+            return ()
+        configured_day, encoded_ids = raw.split(":", 1)
+        if configured_day != day or date.fromisoformat(configured_day).isoformat() != configured_day:
+            return ()
+    except (ValueError, TypeError):
+        return ()
+    identifiers = encoded_ids.split(",")
+    if not 1 <= len(identifiers) <= 100 or any(re.fullmatch(r"[0-9a-fA-F]{32}", value) is None
+                                              for value in identifiers):
+        return ()
+    normalized = tuple(value.lower() for value in identifiers)
+    return normalized if len(set(normalized)) == len(normalized) else ()
 
 
 def _now(now: datetime | None = None) -> datetime:
@@ -376,6 +402,16 @@ def reserve_route(conn: sqlite3.Connection, tg_id: int, claim_id: str,
         raise AccessQuotaError("Лимит попыток создания и правки маршрутов по приглашению исчерпан.")
     day = current.date().isoformat()
     used = conn.execute("SELECT COUNT(*) FROM access_route_attempts WHERE usage_day = ?", (day,)).fetchone()[0]
+    if exempt_ids := owner_test_claim_ids(day):
+        # The access ledger survives account deletion. Match its owner HMAC,
+        # never a claimed account ID or a former guest invitation reservation.
+        owner_subjects = {_subject(conn, owner) for owner in _owner_ids()}
+        placeholders = ",".join("?" for _ in exempt_ids)
+        rows = conn.execute(
+            f"SELECT subject_hash FROM access_route_attempts WHERE usage_day = ? "
+            f"AND grant_id IS NULL AND claim_id IN ({placeholders})", (day, *exempt_ids),
+        ).fetchall()
+        used -= sum(row["subject_hash"] in owner_subjects for row in rows)
     if used >= _global_limit():
         raise AccessQuotaError("Общий дневной лимит приложения исчерпан. Попробуйте завтра.")
     conn.execute("INSERT INTO access_route_attempts(claim_id, subject_hash, grant_id, usage_day, created_at) "

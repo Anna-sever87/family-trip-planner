@@ -844,10 +844,20 @@ def _ai_usage_count(conn: sqlite3.Connection, tg_id: int, day: str) -> int:
     active = int(conn.execute(
         "SELECT COUNT(*) FROM ai_requests WHERE tg_id = ? AND usage_date = ?", (tg_id, day)
     ).fetchone()[0])
+    import access_control
+    if access_control.is_owner(tg_id) and (exempt_ids := access_control.owner_test_claim_ids(day)):
+        placeholders = ",".join("?" for _ in exempt_ids)
+        active -= int(conn.execute(
+            f"SELECT COUNT(*) FROM ai_requests WHERE tg_id = ? AND usage_date = ? "
+            f"AND claim_id IN ({placeholders})", (tg_id, day, *exempt_ids),
+        ).fetchone()[0])
     retained = conn.execute(
         "SELECT used FROM ai_quota_retention WHERE key_hash = ? AND usage_date = ?",
         (_ai_quota_key(conn, tg_id, day), day),
     ).fetchone()
+    # Retention was already adjusted by this function at deletion. Only live
+    # matching records above are subtracted, so a deleted test is not deducted
+    # again from personal usage retained across account recreation.
     return active + (int(retained["used"]) if retained is not None else 0)
 
 

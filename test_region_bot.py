@@ -224,7 +224,7 @@ class RegionalFormattingTests(unittest.TestCase):
             text,
         )
         self.assertIn(
-            "🚗 Переезд: Из Иркутска",
+            "🚗 Перемещения: Из Иркутска",
             text,
         )
 

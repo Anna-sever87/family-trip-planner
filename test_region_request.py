@@ -127,7 +127,10 @@ def test_region_detail_roundtrip_includes_kind_base_and_transfer() -> None:
     assert detail["request"]["destination_kind"] == "region"
     day = detail["itinerary"]["days"][0]
     assert day["base_area"] == "Листвянка"
-    assert "Иркутска" in day["transfer_note"]
+    assert "Начало программы на базе: Листвянка" in day["transfer_note"]
+    assert "заселение планируются отдельно" in day["transfer_note"]
+    assert "Иркутска" in itinerary.days[0].transfer_note
+    assert trip["itinerary"] == itinerary.model_dump()
     note = detail["destination_scope_note"]
     assert "несколько зон выбранной территории" in note
     assert "береговая зона до 5 км" in note
