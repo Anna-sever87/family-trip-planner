@@ -14,9 +14,10 @@ import math
 import re
 
 from city_candidates import CityCandidate, CityCandidateResult, _canonical_record, _lookup
-from city_evidence import recognize_city_managed_tips, tip_sha256
+from city_evidence import city_managed_tip_limit, recognize_city_managed_tips, tip_sha256
 import places
 from schemas import Itinerary, TripRequest
+from rules import city_candidate_limit
 
 
 CONTEXT_KEY = "city_map_context"
@@ -83,7 +84,7 @@ def build_city_context(request: TripRequest, candidates, resolved_city: dict, *,
     if pool_scope not in {"generation_pool", "existing_visits_rechecked"}:
         raise ValueError(CONTEXT_ERROR)
     center = _resolved_center(resolved_city, request)
-    if not isinstance(candidates, (list, tuple)) or not 1 <= len(candidates) <= 24:
+    if not isinstance(candidates, (list, tuple)) or not 1 <= len(candidates) <= city_candidate_limit(request):
         raise ValueError(CONTEXT_ERROR)
     prepared, identifiers, queries = [], set(), set()
     for candidate in candidates:
@@ -119,11 +120,11 @@ def load_city_context(payload: dict, request: TripRequest) -> tuple[list[CityCan
                 or not isinstance(payload["captured_at"], str)
                 or datetime.fromisoformat(payload["captured_at"]).tzinfo is None
                 or not isinstance(payload["candidates"], list)
-                or not 1 <= len(payload["candidates"]) <= 24
+                or not 1 <= len(payload["candidates"]) <= city_candidate_limit(request)
                 or len(json.dumps(payload, ensure_ascii=False, allow_nan=False)) > 200_000):
             raise ValueError(CONTEXT_ERROR)
         if "presentation" in payload:
-            _validated_presentation(payload["presentation"])
+            _validated_presentation(payload["presentation"], request)
         candidates = [CityCandidate(**entry) for entry in payload["candidates"]]
         checked = build_city_context(request, candidates, payload["resolved_city"],
                                      pool_scope=payload["pool_scope"])
@@ -132,11 +133,12 @@ def load_city_context(payload: dict, request: TripRequest) -> tuple[list[CityCan
         raise ValueError(CONTEXT_ERROR) from error
 
 
-def _validated_presentation(value):
+def _validated_presentation(value, request):
     """Presentation ownership only; hashes never authenticate visitor facts."""
     if (not isinstance(value, dict) or set(value) != {"version", "managed_tip_sha256"}
             or type(value["version"]) is not int or value["version"] != 1
-            or not isinstance(value["managed_tip_sha256"], list) or len(value["managed_tip_sha256"]) > 32
+            or not isinstance(value["managed_tip_sha256"], list)
+            or len(value["managed_tip_sha256"]) > city_managed_tip_limit(request)
             or any(not isinstance(digest, str) or not re.fullmatch(r"[a-f0-9]{64}", digest)
                    for digest in value["managed_tip_sha256"])
             or len(set(value["managed_tip_sha256"])) != len(value["managed_tip_sha256"])):
@@ -153,7 +155,7 @@ def city_presentation_tips(payload: dict, itinerary: Itinerary, candidates, requ
     """
     if "presentation" not in payload:
         return recognize_city_managed_tips(itinerary, candidates, request)
-    hashes = _validated_presentation(payload["presentation"])
+    hashes = _validated_presentation(payload["presentation"], request)
     indexed = {}
     for value in itinerary.tips:
         indexed.setdefault(tip_sha256(value), []).append(value)
@@ -174,7 +176,7 @@ def attach_city_presentation(payload: dict, itinerary: Itinerary, candidates, re
     if not hashes and "presentation" not in payload:
         return deepcopy(payload)  # A legacy itinerary without managed text is unchanged.
     presentation = {"version": 1, "managed_tip_sha256": hashes}
-    _validated_presentation(presentation)
+    _validated_presentation(presentation, request)
     result = deepcopy(payload)
     result["presentation"] = presentation
     if len(json.dumps(result, ensure_ascii=False, allow_nan=False)) > 200_000:
@@ -234,14 +236,15 @@ def recover_city_context(request: TripRequest, itinerary: Itinerary, *,
 
     Only existing exact queries are searched. Existing coordinates/names must
     equal the independently returned observation. No candidate is invented or
-    inferred from a coordinate URL. At most 24 names / 36 map attempts.
+    inferred from a coordinate URL. The trip-bound pool and 36 map-attempt cap
+    still apply; a long legacy route may fail safely when lookup runs out.
     """
     from weather import find_city
 
     if itinerary.city_schedule is not True or itinerary.source_schedule:
         raise ValueError(CONTEXT_ERROR)
     visits = [item for day in itinerary.days for item in day.items if item.kind == "attraction"]
-    if not 1 <= len(visits) <= 24 or len({item.place_query for item in visits}) != len(visits):
+    if not 1 <= len(visits) <= city_candidate_limit(request) or len({item.place_query for item in visits}) != len(visits):
         raise ValueError(CONTEXT_ERROR)
     center = _resolved_center(resolved_city if resolved_city is not None else find_city(request.destination), request)
     lookup = lookup or _lookup

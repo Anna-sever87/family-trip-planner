@@ -10,6 +10,12 @@ import hashlib
 
 from city_estimates import city_unpriced_visit_note
 from city_visit_options import visit_option
+from rules import city_candidate_limit
+
+
+def city_managed_tip_limit(request) -> int:
+    """One note per verified visit plus indoor/price notes; keep old tolerance."""
+    return max(32, city_candidate_limit(request) + 2)
 
 
 UNKNOWN_INDOOR_NOTE = (

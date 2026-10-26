@@ -120,6 +120,8 @@ class GroundingResult:
     reserved_http_attempts_upper_bound: int = 0
     http_attempt_limit: int = MAX_HTTP_ATTEMPTS
     query_limit: int = 0
+    regional_discovery_calls: int = 0
+    regional_discovery_issues: dict[str, int] = field(default_factory=dict)
 
 
 def candidate_limit(request: TripRequest) -> int:
@@ -539,10 +541,29 @@ def _administratively_compatible(base_address: Any, poi_address: Any) -> bool:
     return False
 
 
-def _allowed_base_keys(record: dict[str, Any], bases: dict[str, dict[str, Any]]) -> list[str]:
+def _regional_base_compatible(base, record, scope=None):
+    if _administratively_compatible(base.get("map_address"), record.get("address")):
+        return True
+    # A municipal county line is not the edge of an administrative-region
+    # journey. This exception proves only bounded regional membership, never
+    # road access: the unchanged final transport validators still apply.
+    from regional_discovery import inside_admin
+    if scope is None or not inside_admin(record, scope):
+        return False
+    base_record = {**base, "address": base.get("map_address")}
+    if not inside_admin(base_record, scope):
+        return False
+    left, right = base_record["address"], record["address"]
+    for field in ("state", "region"):
+        if left.get(field) and right.get(field) and places._context_identity(left[field]) != places._context_identity(right[field]):
+            return False
+    return places.distance_km(base["lat"], base["lon"], record["lat"], record["lon"]) <= REGION_BASE_RADIUS_KM
+
+
+def _allowed_base_keys(record: dict[str, Any], bases: dict[str, dict[str, Any]], scope=None) -> list[str]:
     return [key for key, base in bases.items()
             if places.distance_km(base["lat"], base["lon"], record["lat"], record["lon"]) <= REGION_BASE_RADIUS_KM
-            and _administratively_compatible(base.get("map_address"), record.get("address"))]
+            and _regional_base_compatible(base, record, scope)]
 
 
 def _confirmed_fact(
@@ -563,7 +584,7 @@ def _confirmed_fact(
         return None, "outside_region"
     if preferred_base_key and places.distance_km(bases[preferred_base_key]["lat"], bases[preferred_base_key]["lon"], lat, lon) > REGION_BASE_RADIUS_KM:
         return None, "outside_base_radius"
-    allowed = _allowed_base_keys(record, bases)
+    allowed = _allowed_base_keys(record, bases, scope)
     if not allowed or (preferred_base_key and preferred_base_key not in allowed):
         return None, "incompatible_base_context"
     provider_metadata = {}
@@ -576,9 +597,10 @@ def _confirmed_fact(
         provider_metadata = {key: record[key] for key in verified_map_places.PROVENANCE_FIELDS}
     osm_identity = places._osm_identity(record)
     for other in result.confirmed_hints:
-        if places.same_map_place(record, other,
+        if (places._normalized_label(query) == places._normalized_label(other.get("place_query", ""))
+                or places.same_map_place(record, other,
                                  first_identity=places.map_record_identity(record),
-                                 second_identity=places.map_record_identity(other)):
+                                 second_identity=places.map_record_identity(other))):
             return None, "duplicate_place"
     fact = {
         "title": title, "place_query": query, "locality": locality,
@@ -624,7 +646,7 @@ def _reuse_cached_hints(
                 place_filter=lambda place, current_base=base: (
                     _eligible_poi_type(place)
                     and _distance_from_bounds(place["lat"], place["lon"], scope) <= region_margin_km(scope)
-                    and _administratively_compatible(current_base.get("map_address"), place.get("address"))
+                    and _regional_base_compatible(current_base, place, scope)
                     and (not aliases or any(places._place_matches_query(alias, place) for alias in aliases))
                 ),
             )
@@ -724,7 +746,7 @@ def _lookup_nearby_poi(
     options = {"place_filter": lambda place: (
         _eligible_poi_type(place)
         and (scope is None or _distance_from_bounds(place["lat"], place["lon"], scope) <= region_margin_km(scope))
-        and _administratively_compatible(base.get("map_address"), place.get("address"))
+        and _regional_base_compatible(base, place, scope)
         and (not source_queries or any(places._place_matches_query(query, place) for query in source_queries))
     )}
     record = places._cached_nearby_named(title, country, base["lat"], base["lon"], REGION_BASE_RADIUS_KM, **options)
@@ -761,7 +783,9 @@ def ground_region_candidates(
 ) -> GroundingResult:
     """Одна completion, не более 3 баз + min(18, 2*days+4) уникальных POI.
 
-    Никаких AI-повторов, перечисления категорий через карту или сеток reverse.
+    Никаких AI-повторов или сеток reverse. Для длинной поездки по
+    административному региону ограниченный картографический резерв (до восьми
+    отправок внутри того же HTTP-лимита) может дополнить неудачный список имён.
     На один точный cache-miss допускается максимум 2 HTTP-попытки карты.
     Общий резерв не более min(42, 2 * (3 + лимит POI)); это верхняя граница,
     а не фактическое число HTTP. При его исчерпании новые запросы прекращаются.
@@ -912,6 +936,7 @@ def ground_region_candidates(
                     reason = "outside_region"
                 else:
                     fact = {"base_key": base_key, "base_query": query, "lat": lat, "lon": lon, "official_name": record["name"],
+                            "map_base_type": record.get("addresstype") or record.get("type"),
                             "map_address": _map_address(record.get("address"))}
                     bases[base_key] = fact
                     result.base_facts.append(fact)
@@ -932,6 +957,9 @@ def ground_region_candidates(
                          if prefer_usable else cache_hints)
     _reuse_cached_hints(early_cache_hints, bases, scope, result, limit, source_queries=source_queries)
 
+    from regional_discovery import administrative_scope, MAX_RESERVE_CALLS
+    use_map_reserve = not result.source_roster_used and request.days_count >= 4 and administrative_scope(scope)
+    reserved_for_discovery = min(MAX_RESERVE_CALLS, result.http_attempt_limit) if use_map_reserve else 0
     for proposal in batch.pois:
         if len(result.confirmed_hints) >= limit:
             break
@@ -959,6 +987,9 @@ def ground_region_candidates(
             reason = "http_budget_exhausted"
         elif base_key not in bases:
             reason = "base_unconfirmed"
+        elif (use_map_reserve and result.reserved_http_attempts_upper_bound + HTTP_ATTEMPTS_PER_EXACT_QUERY
+              > result.http_attempt_limit - reserved_for_discovery):
+            reason = "query_budget_exhausted"
         else:
             seen.add(key)
             aliases = source_queries.get(original_query, ())
@@ -980,4 +1011,37 @@ def ground_region_candidates(
         # Only after suitable named proposals had their chance may old unknown
         # cache entries occupy spare slots. This adds no HTTP requests.
         _reuse_cached_hints(cache_hints, bases, scope, result, limit, source_queries=source_queries)
+    if use_map_reserve and len(result.confirmed_hints) < minimum:
+        _regional_map_reserve(request, scope, bases, result, limit)
     return result
+
+
+def _regional_map_reserve(request, scope, bases, result, limit):
+    """Map evidence supplements an unsuccessful name batch inside its budget."""
+    from regional_discovery import category_records, discover_town
+    dense = [base for base in bases.values() if base.get("map_base_type") in {"city", "town"}]
+    if not dense:
+        used = {key for hint in result.confirmed_hints for key in hint.get("allowed_base_keys", [])}
+        key = next((key for key in BASE_KEYS if key not in bases), None)
+        if key is None:
+            key = next((key for key in reversed(BASE_KEYS) if key not in used), None)
+        record = discover_town(scope, result, near_bases=tuple(bases.values())) if key else None
+        if record is not None and (not bases or min(places.distance_km(base["lat"], base["lon"], float(record["lat"]), float(record["lon"]))
+                                                   for base in bases.values()) <= 100):
+            fact = {"base_key": key, "base_query": record["base_query"],
+                    "lat": float(record["lat"]), "lon": float(record["lon"]), "official_name": record["name"],
+                    "map_base_type": record.get("addresstype") or record.get("type"),
+                    "map_address": _map_address(record.get("address"))}
+            bases[key] = fact
+            result.base_facts[:] = [base for base in result.base_facts if base["base_key"] != key] + [fact]
+            dense = [fact]
+    ordered = dense + [base for base in bases.values() if base not in dense]
+    for base in ordered[:2]:
+        for record in category_records(request, scope, base, result):
+            if len(result.confirmed_hints) >= limit:
+                return
+            title = record["place_query"].split(",", 1)[0]
+            fact, _ = _confirmed_fact(title, record, bases, scope, result, preferred_base_key=base["base_key"])
+            if fact is not None:
+                places._remember_nearby_alias(record)
+                result.confirmed_hints.append(fact)

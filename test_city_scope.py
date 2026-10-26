@@ -90,13 +90,16 @@ class CityScopeTests(unittest.TestCase):
         self.assertTrue(city_only_record_allowed(request(), town))
         self.assertEqual(town, before)
 
-    def test_existing_geographic_alias_is_not_lost_or_extended(self):
+    def test_independently_reviewed_geographic_aliases_keep_city_boundary(self):
         paris = record(city="Paris")
         paris["address"].update(country="France", country_code="fr")
         self.assertTrue(city_only_record_allowed(request(destination="Париж, Франция"), paris))
-        # There is no independently verified native alias in the saved Kemer
-        # center. Do not invent one from a POI translation or lexical similarity.
+        # The reviewed municipality alias is independent of any POI name:ru.
         kemer = record(namedetails={"name": "Kemer Kuğulu Park", "name:ru": "Кемер"})
+        self.assertTrue(city_only_record_allowed(request(destination="Кемер, Турция"), kemer))
+        kemer["namedetails"].pop("name:ru")
+        self.assertTrue(city_only_record_allowed(request(destination="Кемер, Турция"), kemer))
+        kemer["address"]["city"] = "Antalya"
         self.assertFalse(city_only_record_allowed(request(destination="Кемер, Турция"), kemer))
 
     def test_actual_kemer_failure_shape_nearby_antalyas_are_not_city(self):

@@ -14,7 +14,7 @@ import re
 import unicodedata
 
 
-COVER_PROMPT_VERSION = "destination-cover-v13"
+COVER_PROMPT_VERSION = "destination-cover-v14"
 COVER_DISCLOSURE = "ИИ-иллюстрация направления, не фотография места"
 
 COVER_SYSTEM_PROMPT = """Create a premium editorial travel illustration, not documentary evidence.
@@ -56,6 +56,37 @@ accessibility, weather or itinerary verification."""
 # Exact city + country matching prevents e.g. Moscow, USA from becoming Russia.
 # These are stable visual references, not visit facts or route recommendations.
 _TRUSTED_SCENES = {
+    # Singapore Tourism Board: the original lion-headed, fish-bodied fountain.
+    # https://www.visitsingapore.com/see-do-singapore/recreation-leisure/viewpoints/merlion-park/
+    "singapore-singapore": (
+        {"сингапур", "singapore"},
+        {"сингапур", "singapore", "republic of singapore", "республика сингапур"},
+        "The original Merlion fountain at Merlion Park, Singapore: a white "
+        "lion head on a fish body, facing Marina Bay. Show the complete statue "
+        "and its base from the waterfront at eye level. Do not substitute a "
+        "different Merlion or add a collage of monuments. Season-neutral daylight.",
+    ),
+    # Operator: https://ruskeala.ru/canyon.html
+    # A regional illustration, not evidence that this visit is in the itinerary.
+    "karelia-russia": (
+        {"карелия", "республика карелия", "karelia", "republic of karelia"},
+        {"россия", "russia", "russian federation", "российская федерация"},
+        "The water-filled Marble Canyon in Ruskeala Mountain Park, Republic of "
+        "Karelia, Russia: pale marble rock walls reflected in water, wooded "
+        "edges. A coherent broad view from the shore, not an aerial photograph "
+        "or an impossible view of the whole region. Do not add buildings, boats "
+        "or other landmarks. Season-neutral diffuse daylight.",
+    ),
+    # Theatre: https://novat.ru/news/news_media/novat_teatr_yubilyar_i_rovesnik_pobedy/
+    "novosibirsk-russia": (
+        {"новосибирск", "novosibirsk"},
+        {"россия", "russia", "russian federation", "российская федерация"},
+        "The Novosibirsk Opera and Ballet Theatre (NOVAT), Novosibirsk, Russia: "
+        "the recognizable broad theatre building with its enormous shallow "
+        "dome. Show the complete building from the square at ground level, "
+        "including its roof and base with margins. No aerial junction, close-up "
+        "of columns or invented towers. Season-neutral diffuse daylight.",
+    ),
     # Official site: https://dinhdoclap.gov.vn/en/the-independence-palace-national-historic-site/
     # The present palace opened in 1966; it is NOT an imperial citadel or pagoda.
     "ho-chi-minh-vietnam": (
@@ -137,6 +168,9 @@ _GENERIC_SCENE = (
     "Do not generate an image. Display the application's free neutral cover."
 )
 _COMPACT_SCENES = {
+    "singapore-singapore": "Мерлайон у Marina Bay: белый фонтан с головой льва и телом рыбы, статуя с основанием целиком.",
+    "karelia-russia": "Мраморный каньон Рускеала: светлые мраморные скалы отражаются в воде, лесистые берега. Без зданий и лодок.",
+    "novosibirsk-russia": "Театр оперы и балета НОВАТ: широкое здание с огромным пологим куполом, вид с площади. Не перекрёсток.",
     "ho-chi-minh-vietnam": "Дворец воссоединения (Dinh Doc Lap): современное здание 1966 года, горизонтальный фасад с каменными решётками. Не пагода и не крепость.",
     "moscow-russia": "Кремлёвская стена у Москвы-реки.",
     "sochi-russia": "Черноморская набережная Сочи, город и дальние горы.",
@@ -160,10 +194,13 @@ _NATURAL_COMPOSITION = (
     "Общий пейзажный план с берега на уровне глаз; цельная композиция, "
     "запас по краям. Не крупные детали, не аэрофото. "
 )
-_NATURAL_SCENES = frozenset({"sochi-russia", "baikal-russia", "nha-trang-vietnam"})
+_NATURAL_SCENES = frozenset({"sochi-russia", "baikal-russia", "nha-trang-vietnam", "karelia-russia"})
 # Captions describe only the chosen illustration subject, never a claim that
 # the generated pixels faithfully depict it or that a visit was booked.
 _SCENE_CAPTIONS = {
+    "singapore-singapore": "Мерлайон у залива Марина-Бэй",
+    "karelia-russia": "Мраморный каньон Рускеала, Карелия",
+    "novosibirsk-russia": "Новосибирский театр оперы и балета (НОВАТ)",
     "ho-chi-minh-vietnam": "Дворец воссоединения (Dinh Độc Lập)",
     "moscow-russia": "Кремлёвская стена у Москвы-реки",
     "sochi-russia": "Черноморская набережная Сочи",

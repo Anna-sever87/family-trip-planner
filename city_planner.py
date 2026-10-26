@@ -81,7 +81,8 @@ def _discovery_diagnostics(pool) -> dict:
             if type(value) is int and 0 <= value <= 1000:
                 diagnostics[key] = value
         alternatives = raw.get("source_alternatives_confirmed")
-        if type(alternatives) is int and 0 <= alternatives <= 24:
+        from rules import MAX_CITY_CANDIDATES
+        if type(alternatives) is int and 0 <= alternatives <= MAX_CITY_CANDIDATES:
             diagnostics["source_alternatives_confirmed"] = alternatives
         for key in ("name_limit_reached", "map_limit_reached", "usable_limit_reached"):
             if type(raw.get(key)) is bool:
@@ -98,14 +99,14 @@ def _discovery_diagnostics(pool) -> dict:
         counts = raw.get("category_counts")
         if isinstance(counts, dict):
             diagnostics["category_counts"] = {key: value for key, value in counts.items()
-                if key in INTEREST_LABELS and type(value) is int and 0 <= value <= 24}
+                if key in INTEREST_LABELS and type(value) is int and 0 <= value <= MAX_CITY_CANDIDATES}
         from city_candidates import DETAIL_REJECTION_REASONS
         rejected_details = raw.get("detail_rejection_reasons")
         if isinstance(rejected_details, dict):
             diagnostics["detail_rejection_reasons"] = {key: value for key, value in rejected_details.items()
                 if key in DETAIL_REJECTION_REASONS and type(value) is int and 0 <= value <= 1000}
         target = raw.get("pool_target")
-        if type(target) is int and 0 <= target <= 24:
+        if type(target) is int and 0 <= target <= MAX_CITY_CANDIDATES:
             diagnostics["pool_target"] = target
         for key in ("planning_minutes", "required_planning_minutes"):
             value = raw.get(key)
@@ -178,9 +179,10 @@ def evaluate_saved_city_quality(request, candidates, itinerary, prior=None) -> d
     Neither the request, the pool nor the itinerary is modified.
     """
     from generation_quality import safe_coverage
+    from rules import city_candidate_limit
 
     if (request.destination_kind != "city" or itinerary.city_schedule is not True
-            or not isinstance(candidates, (list, tuple)) or not 1 <= len(candidates) <= 24
+            or not isinstance(candidates, (list, tuple)) or not 1 <= len(candidates) <= city_candidate_limit(request)
             or len(itinerary.days) != request.days_count):
         raise ValueError("Нужны проверенный городской календарь и связанный набор мест.")
     known = {item.place_query for item in candidates}
@@ -213,7 +215,7 @@ def evaluate_saved_city_quality(request, candidates, itinerary, prior=None) -> d
 def _incompatible_same_day_pairs(candidates) -> list[dict]:
     """Expose the existing spread rule without asking the model to do geodesy.
 
-    The canonical map pool is already bounded to 24 records: at most 276
+    The canonical map pool is already bounded to 42 records: at most 861
     comparisons. This is straight-line separation, not a route or travel time.
     Input records/identities are not modified or removed.
     """
@@ -481,7 +483,7 @@ def generate_city_itinerary(request: TripRequest, *, max_attempts: int = 3,
             return result(best_itinerary, ["Сервис ИИ не завершил расписание. Маршрут не сохранён."])
         try:
             canonical = decode_city_schedule(response.text, wire_schema, pool.candidates,
-                                             canonical_schema=canonical_schema, **schedule_options)
+                                             canonical_schema=canonical_schema, request=request, **schedule_options)
             if limited:
                 selected = json.loads(canonical)
                 days = {number: ItineraryDay.model_validate(selected[f"day_{number}"])

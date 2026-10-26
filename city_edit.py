@@ -14,7 +14,7 @@ import json
 
 from city_candidates import CityCandidate, _canonical_record, _country_code, _finite_coordinates
 from city_estimates import CHILD_VISIT_NOTE, label_city_estimates
-from city_evidence import recognize_city_managed_tips, replace_city_managed_tips
+from city_evidence import city_managed_tip_limit, recognize_city_managed_tips, replace_city_managed_tips
 from city_quality import check_city_quality
 from city_schedule import build_city_schedule_schema, decode_city_schedule
 from city_visit_estimates import candidate_planning_data, check_city_visit_estimates
@@ -22,7 +22,7 @@ from city_visit_options import check_city_visit_conditions, visit_option
 from grounded_response import _check_schema, _validate
 from places import MAX_DAY_SPREAD_KM, distance_km, map_record_identity, verify_itinerary
 from program_coverage import authorized_free_days, limited_program_problems, rebuild_program_report
-from rules import check_city_radius, check_program_depth, check_rules, check_verified_place_duplicates
+from rules import check_city_radius, check_program_depth, check_rules, check_verified_place_duplicates, city_candidate_limit
 from schemas import Itinerary, ItineraryDay, TripRequest
 
 
@@ -135,8 +135,8 @@ def prepare_city_edit(
     rain = tuple(rainy_dates)
     if any(type(value) is not str or value not in calendar for value in rain) or len(set(rain)) != len(rain):
         raise ValueError("Дождливые даты должны быть уникальными датами поездки.")
-    if not isinstance(candidates, list) or not 1 <= len(candidates) <= 24:
-        raise ValueError("Нужен ограниченный серверный набор из 1–24 кандидатов.")
+    if not isinstance(candidates, list) or not 1 <= len(candidates) <= city_candidate_limit(request):
+        raise ValueError("Нужен ограниченный серверный набор по длительности поездки.")
     center = deepcopy(resolved_city)
     center["country_code"] = _country_code(center["country_code"])
     prepared, records, by_query, identifiers = [], {}, {}, set()
@@ -174,7 +174,7 @@ def prepare_city_edit(
         raise ValueError("Данные карты сохранённого маршрута изменились или требуют повторной проверки.")
     if managed_tip_values is None:
         managed_tip_values = recognize_city_managed_tips(original, prepared, request)
-    if (not isinstance(managed_tip_values, (tuple, list)) or len(managed_tip_values) > 32
+    if (not isinstance(managed_tip_values, (tuple, list)) or len(managed_tip_values) > city_managed_tip_limit(request)
             or any(not isinstance(value, str) or value not in original.tips for value in managed_tip_values)
             or len(set(managed_tip_values)) != len(managed_tip_values)):
         raise ValueError("Некорректная серверная маркировка пояснений маршрута.")
@@ -281,7 +281,7 @@ def city_edit_prompt_data(context: CityEditContext) -> dict:
 
 def decode_city_edit(raw: str, context: CityEditContext) -> Itinerary:
     canonical, wire, pool = _wire_parts(context)
-    decoded = decode_city_schedule(raw, wire, pool, canonical_schema=canonical)
+    decoded = decode_city_schedule(raw, wire, pool, canonical_schema=canonical, request=context.request)
     changed = ItineraryDay.model_validate(json.loads(decoded)[f"day_{context.target_day}"])
     changed.day_mode = "free" if context.was_free and not any(item.kind == "attraction" for item in changed.items) else "program"
     # Never relabel unchanged days. Only independently marked server evidence

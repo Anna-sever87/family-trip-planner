@@ -25,7 +25,7 @@ import places
 from candidate_grounding import _eligible_poi_type
 from city_preferences import shopping_preference
 from destination_name_hints import destination_name_hints
-from rules import MAX_CITY_RADIUS_KM, is_generic_attraction
+from rules import MAX_CITY_RADIUS_KM, city_candidate_limit, city_candidate_name_limit, is_generic_attraction
 from schemas import TripRequest
 
 
@@ -656,8 +656,9 @@ def ground_city_candidates(request: TripRequest, center: dict, *, completion: Ca
     """
     result = CityCandidateResult()
     try:
-        limit = min(36, 4 * request.days_count + 8)
-        usable_limit = min(24, 3 * request.days_count + 3)
+        limit = city_candidate_name_limit(request)
+        candidate_limit = city_candidate_limit(request)
+        usable_limit = min(candidate_limit, 3 * request.days_count + 3)
         parts = [part.strip() for part in request.destination.split(",")]
         code = _country_code(center.get("country_code")) if isinstance(center, dict) else ""
         if (type(allow_partial_program) is not bool
@@ -718,7 +719,7 @@ def ground_city_candidates(request: TripRequest, center: dict, *, completion: Ca
     # Demand enough observed reserve for the requested pace, not merely the
     # acceptance floor. All name/HTTP/candidate caps remain unchanged.
     required_minutes = request.days_count * max(minimum, desired_city_program_minutes(request) or minimum)
-    usable_limit = min(24, max(usable_limit, math.ceil(required_minutes / 60)))
+    usable_limit = min(candidate_limit, max(usable_limit, math.ceil(required_minutes / 60)))
     pool_target = min(usable_limit, max(request.days_count, math.ceil(required_minutes / 90)))
     ordinary_overview = (not request.wishes.strip() and request.trip_goal.strip().casefold()
                          in {"", "познакомиться с городом", "познакомиться с городом."})

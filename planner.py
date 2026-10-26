@@ -143,6 +143,10 @@ def _regional_grounding_diagnostics(grounding, *, blocked_count=0) -> dict:
         "completion_calls": count(grounding.completion_calls),
         "verification_queries": count(grounding.verification_queries),
         "geocode_calls": count(grounding.geocode_calls),
+        "regional_discovery_calls": count(getattr(grounding, "regional_discovery_calls", 0)),
+        "regional_discovery_issues": safe_issue_counts(getattr(grounding, "regional_discovery_issues", None), {
+            "town_response_oversized", "town_response_incomplete", "town_http_error", "town_response_invalid",
+            "town_not_confirmed", "category_search_unavailable", "admin_centre_unavailable"}),
         "cache_only_checks": count(grounding.cache_only_checks),
         "cache_only_added": count(grounding.cache_only_added),
         "source_roster_used": grounding.source_roster_used is True,

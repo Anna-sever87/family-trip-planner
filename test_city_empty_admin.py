@@ -43,7 +43,11 @@ class EmptyAdminClarificationTests(unittest.TestCase):
         before = deepcopy(rows)
         error, get = self.rejected([{}, {"results": rows}])
         self.assertEqual(get.call_count, 2)
-        self.assertEqual([call.kwargs["name"] for call in get.call_args_list], ["Пекин, Пекин", "Пекин, Китай"])
+        self.assertEqual([call.kwargs["name"] for call in get.call_args_list], ["Пекин, Пекин", "Пекин"])
+        # The reviewed China alias now uses the provider's dedicated ISO
+        # country filter on both queries; the explicit admin is not dropped
+        # from the first lookup, and alternatives still require user choice.
+        self.assertTrue(all(call.kwargs["countryCode"] == "CN" for call in get.call_args_list))
         self.assertTrue(all(call.kwargs["count"] == weather.MAX_CITY_RESULTS for call in get.call_args_list))
         self.assertEqual(error.suggestions, ("Пекин, Beijing Shi, Китай", "Пекин, Шаньси, Китай"))
         self.assertEqual(error.suggestion_details[0]["feature_label"], "Столица страны")

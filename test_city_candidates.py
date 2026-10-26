@@ -103,19 +103,19 @@ class CityCandidateTests(unittest.TestCase):
                 self.foreign_pool([], code=code, days=14, provider_title="Test Museum")
                 call = self.completion.call_args
                 item_schema = call.kwargs["json_schema"]["properties"]["titles"]
-                self.assertEqual(item_schema["maxItems"], 36)
+                self.assertEqual(item_schema["maxItems"], 60)
                 self.assertEqual(item_schema["items"]["pattern"], candidates._NON_CYRILLIC_PATTERN)
                 system = call.args[0][0]["content"]
                 context = json.loads(call.args[0][1]["content"])
-                self.assertIn("не больше 36 названий", system)
+                self.assertIn("не больше 60 названий", system)
                 self.assertIn("не делай самодельную транслитерацию", system)
                 self.assertIn("не предполагай", system.casefold())
                 self.assertIn("пустой список", system)
-                self.assertEqual((context["max_titles"], context["map_languages"]), (36, language))
-                self.assertEqual(context["usable_candidate_limit"], 24)
+                self.assertEqual((context["max_titles"], context["map_languages"]), (60, language))
+                self.assertEqual(context["usable_candidate_limit"], 42)
         self.get.assert_not_called()
 
-    def test_fourteen_day_vn_tr_can_confirm_twenty_four_native_places_with_one_ai_call(self):
+    def test_fourteen_day_vn_tr_can_confirm_thirty_six_native_places_with_one_ai_call(self):
         for code, prefix in (("VN", "Bảo tàng Thử Nghiệm"), ("TR", "İlçe Şehir Müzesi")):
             with self.subTest(country=code):
                 self.get.reset_mock()
@@ -130,13 +130,13 @@ class CityCandidateTests(unittest.TestCase):
                 result = self.run_pool(titles, days=14,
                     center={**CENTER, "name": "Test City", "country_code": code}, destination=f"Test City, {code}",
                     children_ages=[14], start_time="09:00", end_time="18:00", pace="средний")
-                self.assertEqual([item.title for item in result.candidates], titles[:24])
+                self.assertEqual([item.title for item in result.candidates], titles)
                 self.assertEqual(result.status, "success")
-                self.assertEqual((result.diagnostics["name_limit"], result.diagnostics["usable_limit"]), (36, 24))
-                self.assertEqual(result.diagnostics["attempted_names"], 24)
+                self.assertEqual((result.diagnostics["name_limit"], result.diagnostics["usable_limit"]), (60, 42))
+                self.assertEqual(result.diagnostics["attempted_names"], 36)
                 self.assertEqual(result.diagnostics["required_planning_minutes"], 3780)
                 self.assertEqual(result.diagnostics["pool_quality"], "limited")
-                self.assertEqual((result.map_requests, self.get.call_count), (24, 24))
+                self.assertEqual((result.map_requests, self.get.call_count), (36, 36))
                 self.assertEqual(result.usage["completion_calls"], 1)
                 self.completion.assert_called_once()
 
@@ -658,7 +658,7 @@ class CityCandidateTests(unittest.TestCase):
         self.assertEqual(context["remaining_name_slots"], 26)
 
     def test_names_only_schema_has_request_specific_cap(self):
-        for days, expected in ((1, 12), (4, 24), (7, 36), (14, 36)):
+        for days, expected in ((1, 12), (4, 24), (7, 36), (8, 36), (9, 44), (14, 60)):
             with self.subTest(days=days):
                 self.run_pool([], days=days)
                 schema = self.completion.call_args.kwargs["json_schema"]

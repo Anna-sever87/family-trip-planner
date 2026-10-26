@@ -15,6 +15,26 @@ from schemas import INTEREST_LABELS, Itinerary, TripRequest
 
 
 MAX_CITY_RADIUS_KM = 40.0
+MAX_CITY_CANDIDATES = 42
+
+
+def city_candidate_limit(request: TripRequest) -> int:
+    """Bound verified reserve to trip length, not a promise of completeness.
+
+    Short trips retain their historical 24-record guard. Longer calendars may
+    need three distinct ordinary visits per day; no visit duration, HTTP/AI
+    allowance or scheduler search budget is increased by this capacity rule.
+    """
+    if (not isinstance(request, TripRequest) or request.destination_kind != "city"
+            or not 1 <= request.days_count <= 14):
+        raise ValueError("Нужна городская поездка на 1–14 дней для ограничения набора мест.")
+    return 24 if request.days_count <= 8 else min(MAX_CITY_CANDIDATES, 3 * request.days_count)
+
+
+def city_candidate_name_limit(request: TripRequest) -> int:
+    """Separate raw-name budget; rejected names never count as verified visits."""
+    city_candidate_limit(request)
+    return min(36 if request.days_count <= 8 else 60, 4 * request.days_count + 8)
 
 PAID_INTEREST_CATEGORIES = {
     "museums",

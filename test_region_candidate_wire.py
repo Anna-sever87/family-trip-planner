@@ -29,6 +29,14 @@ def request():
 
 
 class RegionCandidateWireTests(unittest.TestCase):
+    def setUp(self):
+        # This module isolates the wire/name-validation contract. The separate
+        # map-reserve suite exercises the new bounded discovery path including
+        # every HTTP seam; it must not leak into these legacy fixtures.
+        fallback = patch.object(grounding, '_regional_map_reserve', return_value=None)
+        fallback.start()
+        self.addCleanup(fallback.stop)
+
     def run_payload(self, payload, *, base_error=None, mutation=None, http_budget=42):
         completion = Mock(return_value=GenerationResult(json.dumps(payload, ensure_ascii=False), 11, 13))
         cache = {}

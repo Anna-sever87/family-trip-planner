@@ -51,10 +51,26 @@ _COUNTRY_NAME_CODES = {
     "us": ("США", "USA", "United States", "United States of America", "Соединённые Штаты Америки"),
     "gb": ("Великобритания", "UK", "United Kingdom", "Соединённое Королевство"),
     "de": ("Германия", "Germany", "Deutschland"),
+    # Country-name equivalence only, never a substitute for provider country
+    # codes, city/admin identity or coordinates. Reviewed UNGEGN/UN Data and
+    # Vatican state information; do not infer arbitrary translations.
+    # https://ungegn.un.org/dashboard/countries/details?id=702
+    # https://ungegn.un.org/dashboard/countries/details?id=156
+    # https://data.un.org/legacy/en/iso/va.html
+    "sg": ("Сингапур", "Singapore", "Republic of Singapore", "Республика Сингапур",
+           "Singapura", "新加坡", "新加坡共和国"),
+    "cn": ("Китай", "China", "中国", "中华人民共和国", "Китайская Народная Республика",
+           "People's Republic of China", "the People's Republic of China"),
+    "va": ("Ватикан", "Vatican", "Vatican City", "Vatican City State", "Holy See",
+           "Святой Престол", "Città del Vaticano"),
 }
 _GEOGRAPHIC_CONTEXT_ALIASES = (
     ("Paris", "Париж"),
     ("Tokyo", "Токио", "東京"),
+    # Exact municipality spelling, independently published by GoTürkiye:
+    # https://goturkiye.com/uk/cycling/kemer-beldibi-kemer
+    # The separate country/admin/radius checks still distinguish homonyms.
+    ("Kemer", "Кемер"),
 )
 # Тип подтверждён в ответе Nominatim; координаты по-прежнему берутся из API.
 _KNOWN_GEOGRAPHIC_QUERY_TYPES = {"байкал": "lake", "baikal": "lake"}

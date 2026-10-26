@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING
 from city_response import build_city_response_schema
 from grounded_response import _check_schema, _fix_value, _reject_constant, _unique_object, _validate
 from schemas import TripRequest
+from rules import city_candidate_limit
 
 if TYPE_CHECKING:
     from city_candidates import CityCandidate
@@ -123,8 +124,11 @@ def _selected_program_schema(canonical_schema: dict, program_day_numbers: list[i
     return result
 
 
-def _candidate_pool(candidates: list[CityCandidate], canonical_days: dict[str, dict]) -> dict:
-    if not isinstance(candidates, list) or not 1 <= len(candidates) <= 24:
+def _candidate_pool(candidates: list[CityCandidate], canonical_days: dict[str, dict], request=None) -> dict:
+    # Legacy diagnostic callers without the full saved request keep the strict
+    # historical cap. A single-day edit schema cannot authorize a longer pool.
+    limit = city_candidate_limit(request) if request is not None else 24
+    if not isinstance(candidates, list) or not 1 <= len(candidates) <= limit:
         raise ValueError("Нужен непустой серверный список кандидатов")
     pool = {}
     for candidate in candidates:
@@ -163,7 +167,7 @@ def build_city_schedule_schema(
     canonical_schema = _selected_program_schema(canonical_schema, program_day_numbers)
     schema = build_city_response_schema(canonical_schema, request)
     _, canonical_days = _canonical_days(canonical_schema)
-    pool = _candidate_pool(candidates, canonical_days)
+    pool = _candidate_pool(candidates, canonical_days, request)
     required_visits = 0
     for key in canonical_days:
         day = schema["properties"][key]["properties"]
@@ -191,6 +195,7 @@ def build_city_schedule_schema(
 def decode_city_schedule(
     raw: str, wire_schema: dict, candidates: list[CityCandidate], *, canonical_schema: dict,
     program_day_numbers: list[int] | None = None,
+    request: TripRequest | None = None,
 ) -> str:
     """Validate wire, restore exact server identities and validate canonical JSON.
 
@@ -205,7 +210,9 @@ def decode_city_schedule(
     _check_schema(wire_schema)
     canonical_schema = _selected_program_schema(canonical_schema, program_day_numbers)
     full, canonical_days = _canonical_days(canonical_schema)
-    pool = _candidate_pool(candidates, canonical_days)
+    if request is not None and full and len(canonical_days) != request.days_count:
+        raise ValueError("Число дней исходной схемы должно совпасть с запросом")
+    pool = _candidate_pool(candidates, canonical_days, request)
     expected = set(canonical_days) | (_ROOT_FIELDS if full else set())
     if wire_schema["type"] != "object" or set(wire_schema["properties"]) != expected:
         raise ValueError("Wire-схема не соответствует дням канонического маршрута")

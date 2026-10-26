@@ -149,7 +149,8 @@ def select_city_preferences(request, candidates, *, memory_context="", completio
         return CityPreferenceResult(status="unsupported_preferences", problems=location_problems,
                                     diagnostics=selection_diagnostics)
     known = {item.candidate_id: item for item in candidates}
-    if not known or len(known) != len(candidates) or len(known) > 24:
+    from rules import city_candidate_limit
+    if not known or len(known) != len(candidates) or len(known) > city_candidate_limit(request):
         return CityPreferenceResult(status="insufficient_data", problems=["Нет проверенного набора для учёта пожеланий."],
                                     diagnostics=selection_diagnostics)
     from city_quality import CITY_ONLY_WARNING, city_only_record_allowed

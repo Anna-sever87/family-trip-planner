@@ -284,7 +284,7 @@ class TripCoversTests(unittest.TestCase):
         self.assertEqual(self.rows("cover_attempts"), [])
 
     def test_unknown_city_without_attraction_is_free_readonly_and_not_reserved(self):
-        trip = self.save_trip(destination="Новосибирск, Россия")
+        trip = self.save_trip(destination="Неизвестный город, Россия")
         before = Path(db.DB_PATH).read_bytes()
         for _ in range(3):
             state = self.status(trip)
@@ -298,6 +298,25 @@ class TripCoversTests(unittest.TestCase):
         self.assertEqual(self.manager.executor.calls, [])
         self.assertEqual(self.rows("cover_attempts"), [])
         self.assertEqual(self.rows("trip_covers"), [])
+
+    def test_new_city_state_region_and_city_scenes_use_normal_owned_cover_lifecycle(self):
+        for destination, expected_subject in (
+                ("Сингапур, Сингапур", "Мерлайон у залива Марина-Бэй"),
+                ("Карелия, Россия", "Мраморный каньон Рускеала, Карелия"),
+                ("Новосибирск, Россия", "Новосибирский театр оперы и балета (НОВАТ)")):
+            with self.subTest(destination=destination):
+                trip = self.save_trip(destination=destination)
+                self.assertTrue(self.status(trip)["available"])
+                self.assertEqual(self.submit(trip)["status"], "queued")
+                self.manager.executor.run_next()
+                self.assertEqual(self.status(trip)["status"], "ready")
+                receipt = next(row for row in self.rows("trip_covers") if row["trip_id"] == trip)
+                self.assertEqual(receipt["subject_label"], expected_subject)
+                self.assertEqual(receipt["subject_location"], destination)
+                self.assertEqual(receipt["subject_image_sha256"], hashlib.sha256(self.image.data).hexdigest())
+                self.assertEqual(self.submit(trip)["status"], "ready")
+        self.assertEqual(len(self.rows("cover_attempts")), 3)
+        self.assertEqual(self.submission.call_count, 3)
 
     def test_unknown_city_uses_owned_saved_attraction_in_actual_provider_prompt(self):
         from test_cover_subjects import saved_fixture
@@ -368,7 +387,7 @@ class TripCoversTests(unittest.TestCase):
         self.complete()
         old = self.rows("trip_covers")
         with db.connect() as conn:
-            conn.execute("UPDATE trips SET destination='Новосибирск, Россия' WHERE id=?", (self.trip,))
+            conn.execute("UPDATE trips SET destination='Неизвестный город, Россия' WHERE id=?", (self.trip,))
         with patch.object(covers, "_prompt_for", side_effect=AssertionError("Do not change old receipt")):
             self.assertEqual(self.status()["status"], "ready")
             self.assertEqual(self.submit()["status"], "ready")

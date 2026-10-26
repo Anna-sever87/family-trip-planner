@@ -28,7 +28,7 @@ from destination_name_hints import _https_source
 from places import MAX_DAY_SPREAD_KM, distance_km, verify_itinerary
 from pricing import minimum_meal_cost
 from program_coverage import rebuild_program_report
-from rules import check_city_radius, check_program_depth, check_rules, check_verified_place_duplicates, program_depth_target
+from rules import check_city_radius, check_program_depth, check_rules, check_verified_place_duplicates, city_candidate_limit, program_depth_target
 from schemas import INTEREST_LABELS, Itinerary, ItineraryDay, ItineraryItem, TripRequest
 
 
@@ -371,7 +371,7 @@ def build_deterministic_city_itinerary(
             raise ValueError("Дождливые даты должны быть уникальными датами поездки.")
         rainy = set(rainy_dates)
         input_stage = "candidate_pool"
-        if not isinstance(candidates, (list, tuple)) or len(candidates) > 24:
+        if not isinstance(candidates, (list, tuple)) or len(candidates) > city_candidate_limit(request):
             raise ValueError("Нужен ограниченный серверный набор кандидатов.")
         coverage.update(requested_days=len(dates), confirmed_candidates=len(candidates))
         if not candidates:

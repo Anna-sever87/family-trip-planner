@@ -224,7 +224,7 @@ class SubmissionPackagingTests(unittest.TestCase):
         self.assertTrue({"test_web_ui.js", "test_region_request.py"}.issubset(names))
 
     def test_local_planning_modules_and_imports_are_in_runtime_image(self):
-        required = {"regional_skeleton.py", "regional_routing.py", "visit_facts.py", "source_planning.py", "verified_map_places.py", "city_response.py", "city_candidates.py", "city_planner.py", "city_quality.py", "city_schedule.py"}
+        required = {"regional_discovery.py", "regional_skeleton.py", "regional_routing.py", "visit_facts.py", "source_planning.py", "verified_map_places.py", "city_response.py", "city_candidates.py", "city_planner.py", "city_quality.py", "city_schedule.py"}
         self.assertTrue(required.issubset(packaging.RUNTIME_MODULES))
         packaging.check_docker_sources()
 

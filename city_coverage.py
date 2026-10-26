@@ -13,7 +13,7 @@ from city_quality import _family_minimum, city_break_minutes, city_candidate_may
 from city_visit_estimates import get_city_planning_cap
 from places import MAX_DAY_SPREAD_KM, distance_km
 from pricing import minimum_meal_cost
-from rules import program_depth_target
+from rules import city_candidate_limit, program_depth_target
 from schemas import ItineraryDay, ItineraryItem, TripRequest
 
 
@@ -81,7 +81,7 @@ def build_city_program_witness(request: TripRequest, candidates, rainy_dates=(),
 
     The old independent upper bounds could reserve three days even when only
     two disjoint groups satisfy them together. Enumerate minimal groups, then
-    search their disjoint packings. At most 24 candidates / five visits per
+    search their disjoint packings. At most 42 trip-bound candidates / five visits per
     group are inspected; subset checks AND packing states share max_states.
     If it expires, return only a packing actually found, possibly empty.
 
@@ -97,8 +97,8 @@ def build_city_program_witness(request: TripRequest, candidates, rainy_dates=(),
     if type(max_states) is not int or not 1 <= max_states <= CITY_PACKING_MAX_STATES:
         raise ValueError("Лимит поиска должен быть целым числом от 1 до 20000.")
     candidates = list(candidates)
-    if len(candidates) > 24:
-        raise ValueError("Для ограниченного поиска допускается не более 24 кандидатов.")
+    if len(candidates) > city_candidate_limit(request):
+        raise ValueError("Набор кандидатов превышает ограничение для длительности поездки.")
     first = date.fromisoformat(request.start_date)
     dates = [(first + timedelta(days=index)).isoformat() for index in range(request.days_count)]
     rainy = set(rainy_dates)
