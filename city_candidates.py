@@ -69,6 +69,7 @@ DETAIL_REJECTION_REASONS = frozenset({
     "category_mismatch", "map_unavailable_or_invalid_response", "shared_map_clock_unavailable",
     "amusement_interest_not_requested", "specialized_animal_reserve_limit",
     "city_only_membership_unconfirmed",
+    "service_component_not_visit",
 })
 _LOCAL_NAME_LANGUAGES = {"vn": "vi,en", "tr": "tr,en"}
 # Language choice must not silently reduce the reserve for a longer trip.
@@ -145,6 +146,39 @@ def _specialized_animal_place(record) -> bool:
                      if isinstance(key, str) and (key == "name" or key.startswith("name:")))
     return any(isinstance(value, str) and _SPECIALIZED_ANIMAL_NAME.search(
         unicodedata.normalize("NFKC", value).translate(str.maketrans("‐‑‒–—", "-----"))) for value in names)
+
+
+def _service_component(record) -> bool:
+    """Reject explicitly named parking/entrance records, even with a POI tag.
+
+    Provider tags occasionally describe the parent mall/museum. Only observed
+    names are inspected; no model text, address words or inferred translations
+    can turn a component into a separate visit (or rename it to its parent).
+    """
+    if not isinstance(record, dict):
+        return False
+    names = [str(record.get("name") or "").split(",", 1)[0]]
+    details = record.get("namedetails")
+    if isinstance(details, dict):
+        names.extend(value for key, value in details.items()
+                     if isinstance(key, str) and (key == "name" or key.startswith("name:")))
+    for name in names:
+        if not isinstance(name, str) or not name or len(name) > 500:
+            continue
+        normalized = "".join(char for char in unicodedata.normalize("NFKD", name)
+                             if not unicodedata.combining(char)).casefold()
+        normalized = " ".join(normalized.split()).strip().replace("đ", "d")
+        if re.search(r"^(?:parking\s+(?:garage|lot|for|at)|car\s+park|"
+                     r"парковк[аи]|автостоянк[аи]|паркинг|nha\s+dau\s+xe|"
+                     r"bai\s+(?:do|dau|giu)\s+xe)\b", normalized):
+            return True
+        if re.search(r"^(?:вход\s+(?:в|на)|entrance\s+(?:to|of)|"
+                     r"ticket\s+(?:office|counter)\s+(?:for|at)|"
+                     r"касс[аы]\s+(?:музея|парка|театра))\b", normalized):
+            return True
+        if re.search(r"(?:\bentrance|\bвход|入口|入り口|出入口)$", normalized):
+            return True
+    return False
 
 
 def _proposal_quality(item) -> int:
@@ -300,6 +334,8 @@ def _canonical_record(title: str, record: Any, center: dict) -> dict | None:
         official = str(record.get("name") or "").split(",", 1)[0].strip()
         if not _label(official) or is_generic_attraction(official, ""):
             return None
+        if _service_component(record):
+            return None
         # The global matcher permits provider coordinate strings; canonical
         # records become strict numeric values only after identity validation.
         if (not places._place_matches_query(f"{title}, {center['country_code']}", record)
@@ -420,6 +456,8 @@ def _rejection_detail(title: str, raw: Any, center: dict) -> str:
         return "invalid_coordinates"
     if places.map_record_identity(record) is None:
         return "missing_provider_identity"
+    if _service_component(record):
+        return "service_component_not_visit"
     if not _eligible_poi_type(record) or record.get("type") == "peak":
         return "unsupported_poi_type"
     official = str(record.get("name") or "").split(",", 1)[0].strip()

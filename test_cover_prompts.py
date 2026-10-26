@@ -86,7 +86,7 @@ class CoverPromptTests(unittest.TestCase):
                 self.assertIn("ИИ-обложка", prompt.provider_prompt)
                 self.assertNotIn("синий/белый", prompt.provider_prompt)
                 self.assertLessEqual(len(prompt.provider_prompt), 500)
-                self.assertEqual(prompt.version, "destination-cover-v15")
+                self.assertEqual(prompt.version, "destination-cover-v16")
 
     def test_full_provider_prompt_keeps_whole_subject_or_coherent_shore_at_ground_level(self):
         for city, country in (("Москва", "Россия"), ("Сочи", "Россия"),
@@ -215,7 +215,7 @@ class CoverPromptTests(unittest.TestCase):
                       prompt.provider_prompt)
         self.assertIn("Общий внешний план с земли издалека", prompt.provider_prompt)
         self.assertIn('["Тестгород","Россия"]', prompt.provider_prompt)
-        self.assertEqual(prompt.version, "destination-cover-v15")
+        self.assertEqual(prompt.version, "destination-cover-v16")
         self.assertLessEqual(len(prompt.provider_prompt), 500)
         self.assertNotIn("колонн", prompt.provider_prompt)
         self.assertNotIn("купол", prompt.provider_prompt)

@@ -164,8 +164,8 @@ class WebServiceOutcomeTests(unittest.TestCase):
         request=regional._request()
         self.mock(web_service,'_normalized_trip_request',return_value=request)
         source=grounded._source()
-        bad=json.loads(grounded._wire_response_json(source))
-        bad['day_4']['attractions'][0]['place_query']='REJECTED_PRIVATE_MODEL_STRING'
+        bad=json.loads(grounded._id_wire_response_json(source))
+        bad['day_4']['attractions'][0]['candidate_id']='REJECTED_PRIVATE_MODEL_STRING'
         completion,_,map_verify=grounded.GroundedPlannerTests()._context(self.stack,[
             json.dumps(grounded._batch(source)),json.dumps(bad),json.dumps(bad)])
         self.generate.side_effect=lambda normalized,**kwargs:planner.generate_itinerary(

@@ -14,7 +14,7 @@ import re
 import unicodedata
 
 
-COVER_PROMPT_VERSION = "destination-cover-v15"
+COVER_PROMPT_VERSION = "destination-cover-v16"
 COVER_DISCLOSURE = "ИИ-иллюстрация направления, не фотография места"
 
 COVER_SYSTEM_PROMPT = """Create a premium editorial travel illustration, not documentary evidence.
@@ -85,20 +85,25 @@ _TRUSTED_SCENES = {
         "the recognizable broad theatre building with its enormous shallow "
         "rounded dome. A distant view from the square at pedestrian eye level: "
         "the complete dome silhouette, both ends of the building and the base "
-        "are inside the frame with generous margins. Season-neutral diffuse daylight.",
+        "are inside the frame with generous margins. Natural full colour, a softly "
+        "lit readable facade and clear detail; editorial lighting is not a weather forecast.",
     ),
     # Official site: https://dinhdoclap.gov.vn/en/the-independence-palace-national-historic-site/
+    # Modern main building / rooftop terrace, not the separate tiled pavilion:
+    # https://dinhdoclap.gov.vn/en/independence-palace-architecture/
     # The present palace opened in 1966; it is NOT an imperial citadel or pagoda.
     "ho-chi-minh-vietnam": (
         {"хошимин", "хо ши мин", "ho chi minh city", "ho chi minh", "saigon", "сайгон"},
         {"вьетнам", "vietnam", "viet nam", "việt nam"},
         "The present Independence Palace (Dinh Doc Lap, Reunification Palace) in "
         "Ho Chi Minh City, Vietnam: the modern 1966 low, broad multi-level "
-        "building, with horizontal balconies and eaves. Show the whole building "
+        "building, with a white exterior, flat roof terraces and horizontal "
+        "balconies and eaves. Show the whole building "
         "from across the front lawn at eye level, with both ends of the facade, "
         "the complete roof and base inside the frame and generous margins. "
         "Do not substitute an imperial citadel, a pagoda or the demolished "
-        "Norodom Palace. Do not isolate architectural details.",
+        "Norodom Palace. Do not isolate architectural details. Natural full colour, "
+        "a softly lit readable facade and clear detail; editorial lighting is not a weather forecast.",
     ),
     "moscow-russia": (
         {"москва", "moscow"},
@@ -172,8 +177,8 @@ _GENERIC_SCENE = (
 _COMPACT_SCENES = {
     "singapore-singapore": "Мерлайон у Marina Bay: белый фонтан с головой льва и телом рыбы, статуя с основанием целиком.",
     "karelia-russia": "Мраморный каньон Рускеала: светлые мраморные скалы отражаются в воде, лесистые берега. Без зданий и лодок.",
-    "novosibirsk-russia": "Новосибирский театр оперы и балета НОВАТ: широкое здание с огромным пологим округлым куполом. Вид с площади, весь силуэт купола и оба края здания.",
-    "ho-chi-minh-vietnam": "Дворец воссоединения Dinh Doc Lap (1966): широкое невысокое здание, ярусы балконов. Вид через лужайку, оба края фасада.",
+    "novosibirsk-russia": "Театр оперы и балета НОВАТ: широкое здание с огромным пологим округлым куполом. Вид с площади, весь силуэт купола и оба края здания.",
+    "ho-chi-minh-vietnam": "Дворец Dinh Doc Lap (1966): белое здание модернизма, плоская крыша-терраса, горизонтальные балконы. Через лужайку, оба края фасада.",
     "moscow-russia": "Кремлёвская стена у Москвы-реки.",
     "sochi-russia": "Черноморская набережная Сочи, город и дальние горы.",
     "baikal-russia": "Байкал: открытая пресная вода, скалистый берег, сосновый лес.",
@@ -197,6 +202,7 @@ _DISTANT_BUILDING_COMPOSITION = (
     "Общий план с земли издалека, на уровне глаз. Всё здание в центре, до 60% ширины кадра: "
     "полный контур, крыша и основание без обрезки; запас по краям. "
 )
+_DISTANT_BUILDING_LIGHT = "Цветной дневной кадр, естественные цвета, светлый фасад; не прогноз сезона. "
 _NATURAL_COMPOSITION = (
     "Общий пейзажный план с берега на уровне глаз; цельная композиция, "
     "запас по краям. Не крупные детали, не аэрофото. "
@@ -425,11 +431,9 @@ def build_cover_prompt(
         scene_prompt = _DISTANT_BUILDING_COMPOSITION + scene_prompt
     else:
         scene_prompt += _NATURAL_COMPOSITION if template_key in _NATURAL_SCENES else _COMPACT_COMPOSITION
-    subject_prompt = (
-        scene_prompt
-        + "Нейтральный дневной свет, не прогноз сезона. "
-        "Без людей, текста, логотипов, цен и вымышленных мест."
-    )
+    lighting = (_DISTANT_BUILDING_LIGHT if template_key in _DISTANT_BUILDING_SCENES
+                else "Нейтральный дневной свет, не прогноз сезона. ")
+    subject_prompt = scene_prompt + lighting + "Без людей, текста, логотипов, цен и вымышленных мест."
     provider_prompt = _COMPACT_STYLE + subject_prompt if template_key != "generic" else ""
     if len(provider_prompt) > 500:
         # Reduce style verbosity only, never the place, country or safety rules.

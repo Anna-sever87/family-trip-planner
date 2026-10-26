@@ -64,6 +64,37 @@ class AcceptanceDestinationCoverTests(unittest.TestCase):
                 self.assertFalse(prompt.generation_allowed)
                 self.assertEqual((prompt.provider_prompt, prompt.subject_label), ("", ""))
 
+    def test_two_reviewed_buildings_keep_full_colour_whole_subject_and_identity_under_500(self):
+        # Real v15 evidence was dark monochrome / an invented tiled-roof palace.
+        # This verifies prompt contracts only; new images still need visual review.
+        for key in ("novosibirsk-russia", "ho-chi-minh-vietnam"):
+            cities, countries, _ = _TRUSTED_SCENES[key]
+            for city in cities:
+                for country in countries:
+                    with self.subTest(city=city, country=country):
+                        prompt = self.build(city, country)
+                        self.assertTrue(prompt.generation_allowed)
+                        self.assertEqual(prompt.version, "destination-cover-v16")
+                        self.assertLessEqual(len(prompt.provider_prompt), 500)
+                        self.assertIn(json.dumps([city, country], ensure_ascii=False, separators=(",", ":")),
+                                      prompt.provider_prompt)
+                        for required in ("Цветной дневной кадр", "естественные цвета", "светлый фасад",
+                                         "Всё здание", "полный контур", "крыша и основание без обрезки",
+                                         "с земли издалека, на уровне глаз", "не прогноз сезона",
+                                         "Без людей, текста, логотипов, цен и вымышленных мест"):
+                            self.assertIn(required, prompt.provider_prompt)
+                        if key == "ho-chi-minh-vietnam":
+                            for required in ("Dinh Doc Lap", "1966", "белое здание модернизма",
+                                             "плоская крыша-терраса", "горизонтальные балконы",
+                                             "Через лужайку", "оба края фасада"):
+                                self.assertIn(required, prompt.provider_prompt)
+                            for unwanted in ("черепиц", "двускат", "пагод", "решёт", "колонн"):
+                                self.assertNotIn(unwanted, prompt.provider_prompt)
+                            scene = json.loads(prompt.user_prompt)["trusted_scene"]
+                            self.assertIn("modern 1966", scene)
+                            self.assertIn("flat roof terraces", scene)
+                            self.assertEqual(prompt.subject_label, "Дворец воссоединения (Dinh Độc Lập)")
+
 
 if __name__ == "__main__":
     unittest.main()

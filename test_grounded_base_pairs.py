@@ -130,8 +130,8 @@ class GroundedBasePairsTests(unittest.TestCase):
         narrowed = scheduling.constrain_grounded_schema(schema, grounding)
         self.assertEqual(narrowed["properties"]["day_2"]["properties"]["items"]["items"]["properties"]["area"]["enum"], ["", "Листвянка"])
         self.assertEqual(schema, before)
-        self.assertIn("allowed_base_keys", scheduling.GROUNDED_SYSTEM_PROMPT)
-        self.assertIn("area — дословная locality", scheduling.GROUNDED_SYSTEM_PROMPT)
+        self.assertIn("allowed_base_ids", scheduling.GROUNDED_SYSTEM_PROMPT)
+        self.assertIn("Название, поисковый запрос и местность восстановит программа", scheduling.GROUNDED_SYSTEM_PROMPT)
 
     def test_no_arbitrary_area_search_before_grounded_contract_is_satisfied(self):
         source = integrated._source()
@@ -140,7 +140,7 @@ class GroundedBasePairsTests(unittest.TestCase):
         with ExitStack() as stack:
             helper = integrated.GroundedPlannerTests()
             generate, lookup, verify = helper._context(stack, [
-                json.dumps(integrated._batch(original)), integrated._wire_response_json(source),
+                json.dumps(integrated._batch(original)), integrated._id_wire_response_json(source),
             ])
             # Strict wire enums reject arbitrary areas before map validation.
             with self.assertRaisesRegex(RuntimeError, "нужном формате"):

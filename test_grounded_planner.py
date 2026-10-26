@@ -69,10 +69,42 @@ def _wire_response_json(source, selected=None):
     return json.dumps(payload, ensure_ascii=False)
 
 
+def _id_wire_response_json(source, selected=None, *, catalog=None):
+    """Author an ID-wire fixture before the completion stub is installed.
+
+    Unknown selections deliberately become unknown codes. Conflicting legacy
+    identity fields stay as forbidden extras so negative tests cannot be
+    accidentally repaired by fixture serialization.
+    """
+    payload = json.loads(_wire_response_json(source, selected))
+    if catalog is None:
+        fixture = _batch(_source())
+        bases = {row['base_query']: f'b{index:02}' for index,row in enumerate(fixture['bases'],1)}
+        choices = {row['place_query']: (f'p{index:02}',row['title'],row['locality'])
+                   for index,row in enumerate(fixture['pois'],1)}
+    else:
+        bases = {row[2]:row[0] for row in catalog.bases}
+        choices = {row[2]:(row[0],row[1],row[3]) for row in catalog.candidates}
+    for key,day in payload.items():
+        if not key.startswith('day_'):
+            continue
+        day['base_id'] = bases.get(day.pop('base_area'),'b99')
+        for item in day['attractions']:
+            choice = choices.get(item.pop('place_query'))
+            item['candidate_id'] = choice[0] if choice else 'p99'
+            if choice and item['title'] == choice[1]:
+                item.pop('title')
+            elif not choice:
+                item.pop('title')
+            if not choice or item['area'] in ('',choice[2]):
+                item.pop('area')
+    return json.dumps(payload,ensure_ascii=False)
+
+
 class GroundedPlannerTests(unittest.TestCase):
     def test_wire_fixture_never_emits_server_schedule_markers(self):
         source = _source().model_copy(update={"source_schedule": True, "city_schedule": True})
-        payload = json.loads(_wire_response_json(source))
+        payload = json.loads(_id_wire_response_json(source))
         self.assertNotIn("source_schedule", payload)
         self.assertNotIn("city_schedule", payload)
         self.assertNotIn("program_report", payload)
@@ -136,7 +168,7 @@ class GroundedPlannerTests(unittest.TestCase):
         source = _source()
         with ExitStack() as stack:
             generate, lookup, _ = self._context(stack, [
-                json.dumps(_batch(source), ensure_ascii=False), _wire_response_json(source),
+                json.dumps(_batch(source), ensure_ascii=False), _id_wire_response_json(source),
             ])
             result = planner.generate_itinerary(regional._request(), max_attempts=3, ground_candidates=True)
         self.assertEqual((generate.call_count, result.attempts, result.problems), (2, 2, []))
@@ -151,7 +183,7 @@ class GroundedPlannerTests(unittest.TestCase):
         source = _source()
         payload = _batch(source)
         with ExitStack() as stack:
-            generate, _, _ = self._context(stack, [json.dumps(payload), _wire_response_json(source)])
+            generate, _, _ = self._context(stack, [json.dumps(payload), _id_wire_response_json(source)])
             planner.generate_itinerary(regional._request(), max_attempts=3, ground_candidates=True, memory_context="Test preference")
         messages = generate.call_args_list[1].args[0]
         data = json.loads(messages[1]["content"])
@@ -162,8 +194,8 @@ class GroundedPlannerTests(unittest.TestCase):
         self.assertEqual(data["memory_context"], "Test preference")
         schema = generate.call_args_list[1].kwargs["json_schema"]
         fields = schema["properties"]["day_1"]["properties"]
-        self.assertEqual(set(fields["base_area"]["enum"]), {BASE_QUERY, SECOND_BASE_QUERY})
-        self.assertEqual(set(fields["attractions"]["items"]["properties"]["place_query"]["enum"]), allowed)
+        self.assertEqual(set(fields["base_id"]["enum"]), {"b01", "b02"})
+        self.assertEqual(set(fields["attractions"]["items"]["properties"]["candidate_id"]["enum"]), {f"p{i:02}" for i in range(1,15)})
         self.assertNotIn("items", fields)
         self.assertEqual(fields["attractions"]["minItems"], 1)
         self.assertTrue(messages[0]["content"].endswith(planner.GROUNDED_RESPONSE_FORMAT_RULE))
@@ -174,7 +206,7 @@ class GroundedPlannerTests(unittest.TestCase):
         regional._attraction(short.days[1]).duration_min = 90
         with ExitStack() as stack:
             generate, _, _ = self._context(stack, [
-                json.dumps(_batch(source)), _wire_response_json(short), _wire_response_json(source, [2, 3]),
+                json.dumps(_batch(source)), _id_wire_response_json(short), _id_wire_response_json(source, [2, 3]),
             ])
             result = planner.generate_itinerary(regional._request(), max_attempts=3, ground_candidates=True)
         self.assertEqual((generate.call_count, result.attempts, result.problems), (3, 3, []))
@@ -184,8 +216,8 @@ class GroundedPlannerTests(unittest.TestCase):
         allowed = {poi["place_query"] for poi in _batch(source)["pois"]}
         for number in (2, 3):
             fields = schema["properties"][f"day_{number}"]["properties"]
-            self.assertEqual(set(fields["base_area"]["enum"]), {BASE_QUERY, SECOND_BASE_QUERY})
-            self.assertEqual(set(fields["attractions"]["items"]["properties"]["place_query"]["enum"]), allowed)
+            self.assertEqual(set(fields["base_id"]["enum"]), {"b01", "b02"})
+            self.assertEqual(set(fields["attractions"]["items"]["properties"]["candidate_id"]["enum"]), {f"p{i:02}" for i in range(1,15)})
             self.assertNotIn("items", fields)
         self.assertEqual(result.itinerary.days[0], source.days[0])
         self.assertEqual(result.itinerary.days[2], source.days[2])
@@ -196,7 +228,7 @@ class GroundedPlannerTests(unittest.TestCase):
         regional._attraction(source.days[1]).duration_min = 90
         with ExitStack() as stack:
             generate, _, _ = self._context(stack, [
-                json.dumps(_batch(source)), _wire_response_json(source), _wire_response_json(source, [2, 3]),
+                json.dumps(_batch(source)), _id_wire_response_json(source), _id_wire_response_json(source, [2, 3]),
             ])
             result = planner.generate_itinerary(regional._request(), max_attempts=3, ground_candidates=True)
         self.assertEqual((generate.call_count, result.attempts), (3, 3))
@@ -276,7 +308,7 @@ class GroundedPlannerTests(unittest.TestCase):
                     source.days[1].base_area = "Неподготовленная база, Россия"
                 with ExitStack() as stack:
                     generate, _, verify = self._context(stack, [
-                        json.dumps(_batch(original)), _wire_response_json(source),
+                        json.dumps(_batch(original)), _id_wire_response_json(source),
                     ])
                     # The wire schema rejects an escaped enum even before the
                     # unchanged semantic choices/map validators can run.
@@ -297,14 +329,14 @@ class GroundedPlannerTests(unittest.TestCase):
     def test_wire_missing_meal_rest_or_empty_attractions_retries_within_total_budget(self):
         source = _source()
         for failure in ("meal", "rest", "attractions"):
-            malformed = json.loads(_wire_response_json(source))
+            malformed = json.loads(_id_wire_response_json(source))
             if failure == "attractions":
                 malformed["day_2"][failure] = []
             else:
                 malformed["day_2"].pop(failure)
             with self.subTest(failure=failure), ExitStack() as stack:
                 generate, _, verify = self._context(stack, [
-                    json.dumps(_batch(source)), json.dumps(malformed), _wire_response_json(source),
+                    json.dumps(_batch(source)), json.dumps(malformed), _id_wire_response_json(source),
                 ])
                 result = planner.generate_itinerary(regional._request(), max_attempts=3, ground_candidates=True)
                 self.assertEqual((generate.call_count, result.attempts, result.problems), (3, 3, []))
@@ -324,25 +356,24 @@ class GroundedPlannerTests(unittest.TestCase):
         self.assertEqual(generate.call_count, 3)
         verify.assert_not_called()
 
-    def test_invalid_query_retry_gets_exact_known_choice_without_relaxing_schema(self):
+    def test_invalid_id_retry_keeps_same_catalog_and_schema(self):
         source=_source()
-        bad=json.loads(_wire_response_json(source))
-        bad['day_4']['attractions'][0]['place_query']='REJECTED_PRIVATE_MODEL_STRING'
+        bad=json.loads(_id_wire_response_json(source))
+        bad['day_4']['attractions'][0]['candidate_id']='REJECTED_PRIVATE_MODEL_STRING'
         with ExitStack() as stack:
-            generate,_,verify=self._context(stack,[json.dumps(_batch(source)),json.dumps(bad),_wire_response_json(source)])
+            generate,_,verify=self._context(stack,[json.dumps(_batch(source)),json.dumps(bad),_id_wire_response_json(source)])
             result=planner.generate_itinerary(regional._request(),max_attempts=3,ground_candidates=True)
         self.assertEqual((generate.call_count,result.problems),(3,[]))
         feedback=generate.call_args_list[2].args[0][-1]['content']
-        self.assertIn('CANONICAL_QUERY_CORRECTIONS',feedback)
-        self.assertIn('day_4.attractions[0].place_query',feedback)
-        self.assertIn(regional._attraction(source.days[3]).place_query,feedback)
+        self.assertIn('day_4.attractions[0].candidate_id',feedback)
+        self.assertNotIn('CANONICAL_QUERY_CORRECTIONS',feedback)
         self.assertNotIn('REJECTED_PRIVATE',feedback)
         self.assertEqual(generate.call_args_list[1].kwargs['json_schema'],generate.call_args_list[2].kwargs['json_schema'])
         verify.assert_called_once()
 
     def test_repeated_enum_failure_is_typed_and_never_calls_a_fourth_time(self):
-        source=_source();bad=json.loads(_wire_response_json(source))
-        bad['day_4']['attractions'][0]['place_query']='REJECTED_PRIVATE_MODEL_STRING'
+        source=_source();bad=json.loads(_id_wire_response_json(source))
+        bad['day_4']['attractions'][0]['candidate_id']='REJECTED_PRIVATE_MODEL_STRING'
         with ExitStack() as stack:
             generate,_,verify=self._context(stack,[json.dumps(_batch(source)),json.dumps(bad),json.dumps(bad)])
             with self.assertRaises(planner.PlannerFormatError) as raised:
@@ -354,12 +385,12 @@ class GroundedPlannerTests(unittest.TestCase):
     def test_malformed_wire_repair_keeps_rejected_source_and_never_calls_a_fourth_time(self):
         source = _source()
         regional._attraction(source.days[1]).duration_min = 90
-        malformed = json.loads(_wire_response_json(source, [2, 3]))
+        malformed = json.loads(_id_wire_response_json(source, [2, 3]))
         malformed["day_2"].pop("meal")
         before = source.model_dump()
         with ExitStack() as stack:
             generate, _, verify = self._context(stack, [
-                json.dumps(_batch(source)), _wire_response_json(source), json.dumps(malformed),
+                json.dumps(_batch(source)), _id_wire_response_json(source), json.dumps(malformed),
             ])
             result = planner.generate_itinerary(regional._request(), max_attempts=3, ground_candidates=True)
         self.assertEqual((generate.call_count, result.attempts), (3, 3))
@@ -369,16 +400,17 @@ class GroundedPlannerTests(unittest.TestCase):
         self.assertEqual(result.itinerary.model_dump(), before)
         self.assertEqual(source.model_dump(), before)
 
-    def test_grounded_wire_accepts_explicitly_allowed_empty_area(self):
+    def test_id_wire_restores_canonical_locality_without_changing_meal_or_rest(self):
         source = _source()
         for day in source.days:
             for item in day.items:
                 item.area = ""
         with ExitStack() as stack:
-            generate, _, verify = self._context(stack, [json.dumps(_batch(source)), _wire_response_json(source)])
+            generate, _, verify = self._context(stack, [json.dumps(_batch(source)), _id_wire_response_json(source)])
             result = planner.generate_itinerary(regional._request(), max_attempts=3, ground_candidates=True)
         self.assertEqual((generate.call_count, result.problems), (2, []))
-        self.assertTrue(all(item.area == "" for day in result.itinerary.days for item in day.items))
+        self.assertTrue(all(item.area == ("Листвянка" if item.kind == "attraction" else "")
+                            for day in result.itinerary.days for item in day.items))
         verify.assert_called_once()
 
     def test_budget_below_two_is_rejected_before_any_completion(self):

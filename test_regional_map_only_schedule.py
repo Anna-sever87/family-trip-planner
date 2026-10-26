@@ -20,7 +20,8 @@ import planner
 from pricing import minimum_meal_cost
 import source_planning
 from schemas import Itinerary, ItineraryDay, ItineraryItem, TripRequest
-from test_grounded_planner import _wire_response_json
+from test_grounded_planner import _id_wire_response_json
+from grounded_response import freeze_grounded_catalog
 from yandex_ai import GenerationResult
 
 
@@ -103,7 +104,7 @@ class RegionalMapOnlyScheduleTests(unittest.TestCase):
                 return deepcopy(row)
             geo = stack.enter_context(patch.object(places,"geocode",side_effect=geocode))
             completion = stack.enter_context(patch.object(planner,"generate_json",
-                return_value=GenerationResult(_wire_response_json(route), 30,40)))
+                return_value=GenerationResult(_id_wire_response_json(route,catalog=freeze_grounded_catalog(grounding)), 30,40)))
             if expected_format_failure:
                 with self.assertRaisesRegex(RuntimeError, "Не удалось получить маршрут в нужном формате"):
                     planner.generate_itinerary(request, max_attempts=2, ground_candidates=True)

@@ -8,7 +8,9 @@ JSON Schema implementation. New schema keywords need explicit support here.
 """
 
 from copy import deepcopy
+from dataclasses import dataclass
 from datetime import date, timedelta
+import hashlib
 import json
 import math
 import re
@@ -29,6 +31,114 @@ _KEYWORDS = {
     "number": {"minimum", "maximum"},
     "boolean": set(),
 }
+
+
+def _grounded_fingerprint(grounding):
+    from grounded_schedule import _pool
+    bases,candidates=_pool(grounding)
+    # Provider identity stays server-owned. Include it in the immutability
+    # check even though the prompt-facing pool deliberately omits these fields.
+    fields = ('provider', 'osm_type', 'osm_id', 'official_name', 'map_address')
+    evidence = [[{key: row[key] for key in fields if key in row}
+                 for row in rows if isinstance(row, dict)]
+                for rows in (grounding.base_facts, grounding.confirmed_hints)]
+    try:
+        encoded=json.dumps([bases,candidates,evidence],ensure_ascii=False,sort_keys=True,
+                           allow_nan=False,separators=(',',':'))
+    except (TypeError, ValueError, RecursionError) as error:
+        raise ValueError('Некорректная идентичность подтверждённого набора') from error
+    return hashlib.sha256(encoded.encode('utf-8')).hexdigest(),bases,candidates
+
+
+@dataclass(frozen=True)
+class FrozenGroundedCatalog:
+    """Per-operation immutable map identity choices; never returned by AI."""
+    fingerprint: str
+    bases: tuple
+    candidates: tuple
+
+    def assert_matches(self,grounding):
+        if freeze_grounded_catalog(grounding) != self:
+            raise ValueError('Подтверждённый набор изменился после назначения идентификаторов')
+
+
+def freeze_grounded_catalog(grounding):
+    fingerprint,bases,candidates=_grounded_fingerprint(grounding)
+    if not bases or not candidates or len(bases)>3 or len(candidates)>18:
+        raise ValueError('Неподдерживаемый размер подтверждённого набора')
+    if len({row['base_query'] for row in bases}) != len(bases):
+        raise ValueError('Подтверждённый набор содержит неоднозначный запрос базы')
+    return FrozenGroundedCatalog(fingerprint,
+        tuple((f'b{index:02}',row['base_key'],row['base_query']) for index,row in enumerate(bases,1)),
+        tuple((f'p{index:02}',row['title'],row['place_query'],row['locality'],tuple(row['allowed_base_keys']))
+              for index,row in enumerate(candidates,1)))
+
+
+def build_grounded_id_schema(original_wire: dict, grounding, *, catalog: FrozenGroundedCatalog) -> dict:
+    """Project the already constrained full/partial wire onto short choices."""
+    catalog.assert_matches(grounding)
+    _check_schema(original_wire)
+    result=deepcopy(original_wire)
+    candidate_by_query={row[2]:row[0] for row in catalog.candidates}
+    base_by_query={row[2]:row[0] for row in catalog.bases}
+    for key,day in result['properties'].items():
+        if not _DAY_KEY.fullmatch(key):
+            continue
+        props=day['properties'];base=props.pop('base_area')
+        queries=base.get('enum')
+        if not isinstance(queries,list) or not queries or any(query not in base_by_query for query in queries):
+            raise ValueError('Схема базы не связана с подтверждённым набором')
+        props['base_id']={'type':'string','enum':[base_by_query[query] for query in queries],
+                          'minLength':3,'maxLength':3}
+        if 'const' in base:
+            if base['const'] not in queries:
+                raise ValueError('Ограничение базы не соответствует подтверждённому набору')
+            props['base_id']['const']=base_by_query[base['const']]
+        day['required']=[field if field!='base_area' else 'base_id' for field in day['required']]
+        attraction=props['attractions']['items'];fields=attraction['properties']
+        query_schema=fields['place_query']
+        queries=query_schema.get('enum')
+        if not isinstance(queries,list) or not queries or any(query not in candidate_by_query for query in queries):
+            raise ValueError('Схема посещений не связана с подтверждённым набором')
+        for field in ('title','area','place_query'):
+            fields.pop(field)
+        fields['candidate_id']={'type':'string','enum':[candidate_by_query[query] for query in queries],
+                                'minLength':3,'maxLength':3}
+        if 'const' in query_schema:
+            if query_schema['const'] not in queries:
+                raise ValueError('Ограничение посещения не соответствует подтверждённому набору')
+            fields['candidate_id']['const']=candidate_by_query[query_schema['const']]
+        attraction['required']=[field for field in attraction['required'] if field not in {'title','area','place_query'}]+['candidate_id']
+    _check_schema(result)
+    return result
+
+
+def decode_grounded_id_response(raw: str, id_schema: dict, original_wire: dict, grounding,
+                                *, catalog: FrozenGroundedCatalog) -> str:
+    """Strict ID wire → exact frozen identities → original wire → canonical.
+
+    Unknown IDs and conflicting legacy fields fail before hydration. Time,
+    duration, prose, prices, day/date and transport statements stay untouched.
+    """
+    catalog.assert_matches(grounding)
+    if id_schema != build_grounded_id_schema(original_wire,grounding,catalog=catalog):
+        raise ValueError('Схема идентификаторов не соответствует исходному расписанию')
+    if not isinstance(raw,str):
+        raise ValueError('Ответ должен быть строкой JSON')
+    try:
+        payload=json.loads(raw,object_pairs_hook=_unique_object,parse_constant=_reject_constant)
+    except (TypeError,RecursionError) as error:
+        raise ValueError('Некорректный JSON-ответ') from error
+    _validate(payload,id_schema)
+    candidates={row[0]:row for row in catalog.candidates};bases={row[0]:row for row in catalog.bases}
+    for key,day in payload.items():
+        if not _DAY_KEY.fullmatch(key):
+            continue
+        day['base_area']=bases[day.pop('base_id')][2]
+        for item in day['attractions']:
+            candidate=candidates[item.pop('candidate_id')]
+            item.update(title=candidate[1],place_query=candidate[2],area=candidate[3])
+    return decode_grounded_response(json.dumps(payload,ensure_ascii=False,allow_nan=False),original_wire)
 
 
 def _finite_number(value: Any) -> bool:
