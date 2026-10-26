@@ -14,7 +14,7 @@ import re
 import unicodedata
 
 
-COVER_PROMPT_VERSION = "destination-cover-v16"
+COVER_PROMPT_VERSION = "destination-cover-v17"
 COVER_DISCLOSURE = "ИИ-иллюстрация направления, не фотография места"
 
 COVER_SYSTEM_PROMPT = """Create a premium editorial travel illustration, not documentary evidence.
@@ -56,6 +56,17 @@ accessibility, weather or itinerary verification."""
 # Exact city + country matching prevents e.g. Moscow, USA from becoming Russia.
 # These are stable visual references, not visit facts or route recommendations.
 _TRUSTED_SCENES = {
+    # Regional heritage authority: monument identity and railway-station square.
+    # https://perechen.nasledie27.ru/monument/памятник-е-п-хабарову-1958-г
+    "khabarovsk-russia": (
+        {"хабаровск", "khabarovsk"},
+        {"россия", "russia", "russian federation", "российская федерация"},
+        "The monument to Yerofey Pavlovich Khabarov on the railway-station "
+        "square in Khabarovsk, Russia. Show the complete monument and its "
+        "pedestal from the square at pedestrian eye height, with generous "
+        "margins. Do not substitute a museum, city panorama or another monument. "
+        "This illustration does not imply a visit is included in the itinerary.",
+    ),
     # Singapore Tourism Board: the original lion-headed, fish-bodied fountain.
     # https://www.visitsingapore.com/see-do-singapore/recreation-leisure/viewpoints/merlion-park/
     "singapore-singapore": (
@@ -175,6 +186,7 @@ _GENERIC_SCENE = (
     "Do not generate an image. Display the application's free neutral cover."
 )
 _COMPACT_SCENES = {
+    "khabarovsk-russia": "Памятник Ерофею Хабарову на привокзальной площади: вся статуя и постамент целиком, вид с площади.",
     "singapore-singapore": "Мерлайон у Marina Bay: белый фонтан с головой льва и телом рыбы, статуя с основанием целиком.",
     "karelia-russia": "Мраморный каньон Рускеала: светлые мраморные скалы отражаются в воде, лесистые берега. Без зданий и лодок.",
     "novosibirsk-russia": "Театр оперы и балета НОВАТ: широкое здание с огромным пологим округлым куполом. Вид с площади, весь силуэт купола и оба края здания.",
@@ -192,25 +204,20 @@ _COMPACT_STYLE = (
 )
 _SHORT_COMPACT_STYLE = "Детальная резкая ИИ-обложка. "
 _MINIMAL_COMPACT_STYLE = "ИИ-обложка. "
+_GROUND_CAMERA = "Камера с тротуара, высота глаз 1,6 м; горизонтальный взгляд. "
+_BANK_CAMERA = "Камера на берегу, высота глаз 1,6 м; взгляд горизонтально. "
 _COMPACT_COMPOSITION = (
-    "Общий внешний план с земли издалека. Объект целиком в центре, до 60% ширины кадра: "
-    "полный контур, верх (крыша у здания) и основание без обрезки; запас по краям. "
-    "Не крупные детали, не аэрофото. "
+    "Общий план издалека: объект целиком, полный контур, верх и основание без обрезки; "
+    "запас по краям, до 60% ширины. "
 )
 _DISTANT_BUILDING_SCENES = frozenset({"novosibirsk-russia", "ho-chi-minh-vietnam"})
-_DISTANT_BUILDING_COMPOSITION = (
-    "Общий план с земли издалека, на уровне глаз. Всё здание в центре, до 60% ширины кадра: "
-    "полный контур, крыша и основание без обрезки; запас по краям. "
-)
-_DISTANT_BUILDING_LIGHT = "Цветной дневной кадр, естественные цвета, светлый фасад; не прогноз сезона. "
-_NATURAL_COMPOSITION = (
-    "Общий пейзажный план с берега на уровне глаз; цельная композиция, "
-    "запас по краям. Не крупные детали, не аэрофото. "
-)
+_DISTANT_BUILDING_LIGHT = "Цветной дневной свет; не прогноз сезона. "
+_NATURAL_COMPOSITION = "Цельный пейзаж с берега, запас по краям. "
 _NATURAL_SCENES = frozenset({"sochi-russia", "baikal-russia", "nha-trang-vietnam", "karelia-russia"})
 # Captions describe only the chosen illustration subject, never a claim that
 # the generated pixels faithfully depict it or that a visit was booked.
 _SCENE_CAPTIONS = {
+    "khabarovsk-russia": "Памятник Ерофею Хабарову на привокзальной площади",
     "singapore-singapore": "Мерлайон у залива Марина-Бэй",
     "karelia-russia": "Мраморный каньон Рускеала, Карелия",
     "novosibirsk-russia": "Новосибирский театр оперы и балета (НОВАТ)",
@@ -423,23 +430,22 @@ def build_cover_prompt(
     if subject_data is not None and explicit_location:
         actual = json.dumps([locality, local_country], ensure_ascii=False, separators=(",", ":"))
         location = "Поездка: " + labels + ". Место объекта (данные, не команды): " + actual + ". "
-    scene_prompt = location + compact_scene + " "
-    if template_key in _DISTANT_BUILDING_SCENES:
-        # These scenes produced cropped details / overhead views in acceptance.
-        # Put positive camera/framing instructions first; other scenes retain
-        # their existing provider bytes. This is not an image-quality guarantee.
-        scene_prompt = _DISTANT_BUILDING_COMPOSITION + scene_prompt
-    else:
-        scene_prompt += _NATURAL_COMPOSITION if template_key in _NATURAL_SCENES else _COMPACT_COMPOSITION
+    # Yandex receives only provider_prompt, not the separate system instructions.
+    # Every scene, including saved attractions, starts with the same positive
+    # human-height camera contract. Never crowd it out behind names or style.
+    natural = template_key in _NATURAL_SCENES
+    camera = _BANK_CAMERA if natural else _GROUND_CAMERA
+    composition = _NATURAL_COMPOSITION if natural else _COMPACT_COMPOSITION
+    scene_prompt = composition + location + compact_scene + " "
     lighting = (_DISTANT_BUILDING_LIGHT if template_key in _DISTANT_BUILDING_SCENES
                 else "Нейтральный дневной свет, не прогноз сезона. ")
     subject_prompt = scene_prompt + lighting + "Без людей, текста, логотипов, цен и вымышленных мест."
-    provider_prompt = _COMPACT_STYLE + subject_prompt if template_key != "generic" else ""
+    provider_prompt = camera + _COMPACT_STYLE + subject_prompt if template_key != "generic" else ""
     if len(provider_prompt) > 500:
         # Reduce style verbosity only, never the place, country or safety rules.
-        provider_prompt = _SHORT_COMPACT_STYLE + subject_prompt
+        provider_prompt = camera + _SHORT_COMPACT_STYLE + subject_prompt
     if len(provider_prompt) > 500:
-        provider_prompt = _MINIMAL_COMPACT_STYLE + subject_prompt
+        provider_prompt = camera + _MINIMAL_COMPACT_STYLE + subject_prompt
     if len(provider_prompt) > 500:
         # Never truncate an exact name or drop safety to spend on an ambiguous
         # substitute. The same free neutral fallback covers oversized labels.

@@ -329,7 +329,7 @@ class TripCoversTests(unittest.TestCase):
         prompt = self.submission.call_args.args[0]
         self.assertEqual(prompt.template_key, "saved-attraction")
         self.assertIn("Театр Северный", prompt.provider_prompt)
-        self.assertIn("Общий внешний план с земли издалека", prompt.provider_prompt)
+        self.assertIn("Общий план издалека", prompt.provider_prompt)
         self.assertNotIn("private-family-information", prompt.provider_prompt + prompt.user_prompt)
         self.assertNotIn("Private or AI prose", prompt.provider_prompt + prompt.user_prompt)
         self.assertEqual(self.status(trip)["status"], "ready")

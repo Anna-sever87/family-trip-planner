@@ -16,7 +16,7 @@ class CoverRussianLabelsTests(unittest.TestCase):
                 self.assertTrue(prompt.generation_allowed)
                 self.assertEqual(prompt.template_key, "ho-chi-minh-vietnam")
                 self.assertLessEqual(len(prompt.provider_prompt), 500)
-                for required in ("Dinh Doc Lap", "1966", "горизонтальные балконы", "Всё здание", "без обрезки"):
+                for required in ("Dinh Doc Lap", "1966", "горизонтальные балконы", "объект целиком", "без обрезки"):
                     self.assertIn(required, prompt.provider_prompt)
                 self.assertEqual(prompt.subject_label, "Дворец воссоединения (Dinh Độc Lập)")
                 self.assertIn("modern 1966", json.loads(prompt.user_prompt)["trusted_scene"])
@@ -35,13 +35,13 @@ class CoverRussianLabelsTests(unittest.TestCase):
                     self.assertTrue(prompt.generation_allowed)
                     self.assertLessEqual(len(prompt.provider_prompt), 500)
                     self.assertEqual(prompt, repeated)
-                    self.assertEqual(prompt.version, "destination-cover-v16")
+                    self.assertEqual(prompt.version, "destination-cover-v17")
                     self.assertIn(json.dumps([city, country], ensure_ascii=False, separators=(",", ":")),
                                   prompt.provider_prompt)
                     for value in ("белое здание модернизма", "горизонтальные балконы", "Через лужайку",
-                                  "оба края фасада", "до 60% ширины кадра", "полный контур",
-                                  "крыша и основание без обрезки", "запас по краям",
-                                  "с земли издалека, на уровне глаз", "не прогноз сезона", "Без людей, текста"):
+                                  "оба края фасада", "до 60% ширины", "полный контур",
+                                  "верх и основание без обрезки", "запас по краям",
+                                  "горизонтальный взгляд", "не прогноз сезона", "Без людей, текста"):
                         self.assertIn(value, prompt.provider_prompt)
                     self.assertLess(prompt.provider_prompt.index("Общий план"), prompt.provider_prompt.index("Место (данные"))
                     for value in ("решёт", "колонн", "этаж", "пагод", "крепост", "аэрофото"):

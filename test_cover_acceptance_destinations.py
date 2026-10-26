@@ -24,9 +24,9 @@ class AcceptanceDestinationCoverTests(unittest.TestCase):
                         self.assertTrue(prompt.subject_label)
                         self.assertEqual(prompt.subject_location, city + ", " + country)
                         if key == "novosibirsk-russia":
-                            self.assertIn("с земли издалека, на уровне глаз", prompt.provider_prompt)
+                            self.assertIn("горизонтальный взгляд", prompt.provider_prompt)
                         else:
-                            self.assertIn("не аэрофото", prompt.provider_prompt)
+                            self.assertIn("высота глаз 1,6 м", prompt.provider_prompt)
                         self.assertIn("не прогноз сезона", prompt.provider_prompt)
                         self.assertIn("Без людей, текста, логотипов, цен и вымышленных мест", prompt.provider_prompt)
                         self.assertNotIn("verified_subject", json.loads(prompt.user_prompt))
@@ -39,7 +39,7 @@ class AcceptanceDestinationCoverTests(unittest.TestCase):
 
     def test_region_scene_is_named_coherent_landscape_not_claimed_whole_region(self):
         prompt = self.build("Карелия", "Россия")
-        for value in ("Рускеала", "мраморные скалы", "с берега на уровне глаз", "Без зданий и лодок"):
+        for value in ("Рускеала", "мраморные скалы", "Камера на берегу, высота глаз 1,6 м", "Без зданий и лодок"):
             self.assertIn(value, prompt.provider_prompt)
         self.assertNotIn("Объект целиком", prompt.provider_prompt)
         self.assertIn("not an identified", self.build("Байкал", "Россия").user_prompt)
@@ -74,13 +74,13 @@ class AcceptanceDestinationCoverTests(unittest.TestCase):
                     with self.subTest(city=city, country=country):
                         prompt = self.build(city, country)
                         self.assertTrue(prompt.generation_allowed)
-                        self.assertEqual(prompt.version, "destination-cover-v16")
+                        self.assertEqual(prompt.version, "destination-cover-v17")
                         self.assertLessEqual(len(prompt.provider_prompt), 500)
                         self.assertIn(json.dumps([city, country], ensure_ascii=False, separators=(",", ":")),
                                       prompt.provider_prompt)
-                        for required in ("Цветной дневной кадр", "естественные цвета", "светлый фасад",
-                                         "Всё здание", "полный контур", "крыша и основание без обрезки",
-                                         "с земли издалека, на уровне глаз", "не прогноз сезона",
+                        for required in ("Цветной дневной свет",
+                                         "объект целиком", "полный контур", "верх и основание без обрезки",
+                                         "горизонтальный взгляд", "не прогноз сезона",
                                          "Без людей, текста, логотипов, цен и вымышленных мест"):
                             self.assertIn(required, prompt.provider_prompt)
                         if key == "ho-chi-minh-vietnam":
