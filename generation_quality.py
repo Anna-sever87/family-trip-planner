@@ -73,11 +73,24 @@ def safe_coverage(raw):
                          ("category_fallback_status", {"success", "empty", "unavailable", "not_requested"}),
                          ("map_discovery_error", {"none", "http_error", "timeout", "invalid_response",
                                                   "oversized_response", "incomplete_response"}),
-                         ("selection_repair_status", {"not_needed", "not_attempted", "improved", "unchanged", "failed"}),
+                         ("selection_repair_status", {"not_needed", "not_attempted", "improved", "revised", "unchanged", "failed"}),
                          ("selection_mode", {"structured_preferences", "semantic_preferences", "memory_ranking"}),
                          ("memory_ranking_status", {"applied", "unavailable"})):
         if isinstance(raw.get(key), str) and raw[key] in allowed:
             clean[key] = raw[key]
+    review = raw.get("selection_review")
+    exclusion_reasons = {"current_request_restriction", "duplicate_or_component",
+                         "not_standalone_visit", "unverifiable_required_condition"}
+    if (isinstance(review, dict) and set(review) == {"reviewed_count", "included_count", "exclusion_counts"}
+            and type(review["reviewed_count"]) is int and 1 <= review["reviewed_count"] <= 42
+            and type(review["included_count"]) is int and 0 <= review["included_count"] <= review["reviewed_count"]
+            and isinstance(review["exclusion_counts"], dict)
+            and set(review["exclusion_counts"]) <= exclusion_reasons
+            and all(type(value) is int and 0 <= value <= 42 for value in review["exclusion_counts"].values())
+            and sum(review["exclusion_counts"].values()) == review["reviewed_count"] - review["included_count"]):
+        clean["selection_review"] = {"reviewed_count": review["reviewed_count"],
+                                     "included_count": review["included_count"],
+                                     "exclusion_counts": dict(review["exclusion_counts"])}
     interests = raw.get("interest_coverage")
     if isinstance(interests, dict):
         clean["interest_coverage"] = {}

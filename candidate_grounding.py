@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from itertools import combinations
 import json
 import math
+import re
 import time
 from typing import Any, Callable, Literal
 
@@ -608,6 +609,8 @@ def _confirmed_fact(
         "allowed_base_keys": allowed,
         "lat": lat, "lon": lon, "official_name": record["name"],
         "map_address": _map_address(record.get("address")),
+        "map_category": record.get("category", ""),
+        "map_poi_type": record.get("type", ""),
         "evidence": "map_identity_and_coordinates_only",
     }
     if osm_identity is not None:
@@ -1004,6 +1007,10 @@ def ground_region_candidates(
                 if fact is not None:
                     fact.update(original_proposal_query=original_query, original_proposal_locality=proposal.locality)
                     result.confirmed_hints.append(fact)
+                elif reason == "duplicate_place":
+                    # The same confirmed name may already have arrived from
+                    # cache. Preserve its semantic selection during rebalance.
+                    _protect_grounded_proposal(result,record,original_query,proposal.locality)
         if reason:
             _reject(result, "poi", query, reason, base_key=base_key)
             budget_stopped |= reason == "http_budget_exhausted"
@@ -1011,14 +1018,91 @@ def ground_region_candidates(
         # Only after suitable named proposals had their chance may old unknown
         # cache entries occupy spare slots. This adds no HTTP requests.
         _reuse_cached_hints(cache_hints, bases, scope, result, limit, source_queries=source_queries)
-    if use_map_reserve and len(result.confirmed_hints) < minimum:
+    if use_map_reserve and _regional_needs_reserve(request, result, minimum):
         _regional_map_reserve(request, scope, bases, result, limit)
     return result
+
+
+def _protect_grounded_proposal(result,record,original_query,locality):
+    identity=places.map_record_identity(record)
+    query=places._normalized_label(record.get('place_query',''))
+    for existing in result.confirmed_hints:
+        same_id=identity is not None and identity==places.map_record_identity(existing)
+        if same_id or query and query==places._normalized_label(existing.get('place_query','')):
+            existing.update(original_proposal_query=original_query,original_proposal_locality=locality)
+            return
+
+
+def _regional_needs_reserve(request, result, minimum):
+    """A warm cache of eighteen short stops is not a seven-day programme."""
+    if len(result.confirmed_hints) < minimum:
+        return True
+    from grounded_schedule import _pool
+    from regional_schedule_witness import build_witness, supports_witness
+    if not supports_witness(request,result.base_facts):
+        return False
+    try:
+        return build_witness(request, *_pool(result), 5) is None
+    except (ValueError, KeyError, TypeError):
+        return True
+
+
+def _balanced_regional_hints(request, bases, hints, limit):
+    """Select from validated facts; protect local anchors and named requests.
+
+    This runs before any itinerary exists. It never modifies saved journeys or
+    drops the successfully grounded model proposals merely to fit a schedule.
+    """
+    groups = {
+        'museum':'museums', 'gallery':'museums', 'park':'parks', 'garden':'parks',
+        'nature_reserve':'parks', 'beach':'parks', 'zoo':'zoos', 'aquarium':'zoos',
+        'theme_park':'amusement_parks', 'mall':'shopping_malls', 'shopping_centre':'shopping_malls',
+        'attraction':'main_sights', 'place_of_worship':'main_sights', 'artwork':'main_sights',
+        'monument':'main_sights', 'memorial':'main_sights', 'archaeological_site':'main_sights',
+    }
+    selected=[]
+    def include(hint):
+        if hint not in selected and len(selected)<limit:
+            selected.append(hint)
+    free_text=places._normalized_label(request.wishes+' '+request.trip_goal+' '+request.stay_area)
+    # A successful exact model proposal is the server's existing semantic
+    # selection. Full literal user names are additionally protected in cache.
+    for hint in hints:
+        title=places._normalized_label(hint['title'])
+        if hint.get('original_proposal_query') or (len(title)>4 and re.search(r'(?<!\w)'+re.escape(title)+r'(?!\w)',free_text)):
+            include(hint)
+    for key,base in bases.items():
+        local=[]
+        for hint in hints:
+            if any(type(hint.get(field)) not in (int,float) for field in ('lat','lon')):
+                continue  # Old metadata is not enough to infer a local anchor.
+            allowed=[candidate for candidate in bases if candidate in hint.get('allowed_base_keys', [])]
+            if not allowed:
+                continue
+            nearest=min(allowed,key=lambda candidate:places.distance_km(bases[candidate]['lat'],bases[candidate]['lon'],hint['lat'],hint['lon']))
+            if nearest==key:
+                local.append(hint)
+        if local:
+            include(local[0])
+    categories=list(dict.fromkeys(list(request.interest_categories)+['museums','parks','main_sights']+
+                                  [groups.get(hint.get('map_poi_type'),'other') for hint in hints]))
+    buckets={category:[hint for hint in hints if groups.get(hint.get('map_poi_type'),'other')==category
+                       and hint not in selected] for category in categories}
+    counts={category:sum(groups.get(hint.get('map_poi_type'),'other')==category for hint in selected)
+            for category in categories}
+    while len(selected)<limit:
+        available=[category for category in categories if buckets[category]]
+        if not available:
+            break
+        category=min(available,key=lambda value:(counts[value],categories.index(value)))
+        include(buckets[category].pop(0));counts[category]+=1
+    return selected
 
 
 def _regional_map_reserve(request, scope, bases, result, limit):
     """Map evidence supplements an unsuccessful name batch inside its budget."""
     from regional_discovery import category_records, discover_town
+    from rules import _CHILD_WORD_RE
     dense = [base for base in bases.values() if base.get("map_base_type") in {"city", "town"}]
     if not dense:
         used = {key for hint in result.confirmed_hints for key in hint.get("allowed_base_keys", [])}
@@ -1038,10 +1122,17 @@ def _regional_map_reserve(request, scope, bases, result, limit):
     ordered = dense + [base for base in bases.values() if base not in dense]
     for base in ordered[:2]:
         for record in category_records(request, scope, base, result):
-            if len(result.confirmed_hints) >= limit:
-                return
+            if len(result.confirmed_hints) >= limit * 4:
+                break  # Bounded temporary alternatives, final public cap unchanged.
             title = record["place_query"].split(",", 1)[0]
+            # Apply the existing adult-only title rule before consuming a
+            # scarce candidate slot, not after paid schedule generation.
+            if not request.children_ages and _CHILD_WORD_RE.search(title):
+                continue
             fact, _ = _confirmed_fact(title, record, bases, scope, result, preferred_base_key=base["base_key"])
             if fact is not None:
                 places._remember_nearby_alias(record)
                 result.confirmed_hints.append(fact)
+        result.confirmed_hints[:] = _balanced_regional_hints(request,bases,result.confirmed_hints,limit)
+        if not _regional_needs_reserve(request,result,candidate_minimum(request)):
+            return

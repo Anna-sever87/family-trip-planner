@@ -45,6 +45,8 @@ _POST_POSITIVE = re.compile(
     r"^\s*(?:[-:]\s*)?(?:(?:мне|нам)\s+)?(?:интересу\w*|нуж\w*|хоч\w*|планир\w*|"
     r"(?:are\s+|is\s+)?(?:wanted|needed|interesting|planned)|interest\s+(?:me|us))\b")
 _SHOPPING_TYPES = frozenset({"mall", "shopping_centre"})
+_REVIEW_EXCLUSIONS = ("current_request_restriction", "duplicate_or_component",
+                      "not_standalone_visit", "unverifiable_required_condition")
 
 
 def _shopping_mention_preference(prefix: str, suffix: str) -> str:
@@ -178,6 +180,19 @@ def select_city_preferences(request, candidates, *, memory_context="", completio
         },
         "required": ["status", "candidate_ids"],
     }
+    # A reserve can be silently shortened to a plausible-looking prefix.
+    # The one existing depth review must explicitly assess every known ID:
+    # omission is not a negative preference decision. No ID is restored by code.
+    complete_depth_review = _depth_feedback is not None
+    if complete_depth_review:
+        schema["properties"]["candidate_decisions"] = {
+            "type": "object", "additionalProperties": False,
+            "properties": {identifier: {"type": "string", "enum": [
+                "include", *_REVIEW_EXCLUSIONS,
+            ]} for identifier in known},
+            "required": list(known),
+        }
+        schema["required"].append("candidate_decisions")
     from city_quality import _family_minimum, desired_city_program_minutes
     from rules import program_depth_target
 
@@ -322,6 +337,23 @@ def select_city_preferences(request, candidates, *, memory_context="", completio
             **({"depth_review": _depth_feedback} if _depth_feedback is not None else {}),
         }, ensure_ascii=False, allow_nan=False)},
     ]
+    if complete_depth_review:
+        messages[0]["content"] += (
+            " В этой единственной проверке полноты резерва дополнительно обязателен candidate_decisions: "
+            "объект с отдельным решением для КАЖДОГО переданного ID, включая конец списка. "
+            "Нельзя вернуть только первые 20 мест, короткий обзор или пропустить ID. "
+            "include означает пригодный резерв; все и только такие ID перечисли в candidate_ids "
+            "по предпочтению. Остальные значения — явная причина исключения: "
+            "current_request_restriction только для действующего ограничения анкеты; "
+            "duplicate_or_component только при данных о повторе/части того же посещения; "
+            "not_standalone_visit для записи, которая не представляет самостоятельного посещения; "
+            "unverifiable_required_condition только когда пользователь требует подтверждённого условия, "
+            "которого нет в данных. Низкий приоритет, место в конце списка, общий тип музея/ТЦ, "
+            "обычная неизвестность часов или цены не являются причиной исключения. "
+            "Это решение о соответствии запросу, не новые факты о достопримечательности. "
+            "Не включай запрещённые или сомнительные места ради количества; полный разбор "
+            "может подтвердить прежний меньший набор."
+        )
     selection_diagnostics["selection_calls"] = 1
     try:
         response = completion(messages, json_schema=schema, temperature=0)
@@ -333,7 +365,8 @@ def select_city_preferences(request, candidates, *, memory_context="", completio
         if not isinstance(response.text, str) or len(response.text) > 12000:
             raise ValueError("invalid response size")
         value = json.loads(response.text, object_pairs_hook=_object, parse_constant=_constant)
-        if not isinstance(value, dict) or set(value) != {"status", "candidate_ids"}:
+        expected_keys = {"status", "candidate_ids"} | ({"candidate_decisions"} if complete_depth_review else set())
+        if not isinstance(value, dict) or set(value) != expected_keys:
             raise ValueError("invalid shape")
         status, identifiers = value["status"], value["candidate_ids"]
         if (status not in {"selected", "insufficient_data", "unsupported_preferences"}
@@ -342,6 +375,20 @@ def select_city_preferences(request, candidates, *, memory_context="", completio
                 or len(set(identifiers)) != len(identifiers)
                 or bool(identifiers) != (status == "selected")):
             raise ValueError("invalid selection")
+        if complete_depth_review:
+            decisions = value["candidate_decisions"]
+            allowed_decisions = {"include", *_REVIEW_EXCLUSIONS}
+            if (not isinstance(decisions, dict) or set(decisions) != set(known)
+                    or any(type(decision) is not str or decision not in allowed_decisions
+                           for decision in decisions.values())
+                    or {identifier for identifier, decision in decisions.items() if decision == "include"}
+                    != set(identifiers)):
+                raise ValueError("incomplete or inconsistent reserve review")
+            selection_diagnostics["selection_review"] = {
+                "reviewed_count": len(decisions), "included_count": len(identifiers),
+                "exclusion_counts": {reason: list(decisions.values()).count(reason)
+                                     for reason in _REVIEW_EXCLUSIONS if reason in decisions.values()},
+            }
     except (TypeError, ValueError):
         return CityPreferenceResult(status="invalid_ai_response", problems=[
             "Не удалось проверить выбор мест с учётом пожеланий. Повторного скрытого запроса нет; маршрут не сохранён."
@@ -389,16 +436,25 @@ def select_city_preferences(request, candidates, *, memory_context="", completio
         reviewed = select_city_preferences(request, candidates, memory_context=memory_context,
                                            completion=completion, allow_depth_repair=False, _depth_feedback=feedback)
         diagnostics.update(selection_calls=2, selection_repair_attempted=True)
-        if reviewed.problems:
+        if (reviewed.problems and reviewed.status in {"unsupported_preferences", "insufficient_data"}
+                and "selection_review" in reviewed.diagnostics):
+            # A complete, internally consistent refusal is an explicit semantic
+            # decision, not a provider failure. Never revive its rejected IDs.
+            reviewed.diagnostics.update(selection_calls=2, selection_repair_attempted=True,
+                                        selection_repair_status="revised")
+            return reviewed
+        elif reviewed.problems:
             diagnostics["selection_repair_status"] = "failed"
             selected.warnings.append("Повторная проверка полноты отбора не завершилась. Сохранён первый проверенный "
                                      "набор; недостающая программа не заполнена предположениями.")
-        elif (reviewed.diagnostics.get("preference_planning_minutes", 0), len(reviewed.candidates)) > (
-                selected_minutes, len(selected.candidates)):
-            reviewed.diagnostics.update(selection_calls=2, selection_repair_attempted=True,
-                                        selection_repair_status="improved")
-            selected = reviewed
         else:
-            diagnostics["selection_repair_status"] = "unchanged"
+            greater = (reviewed.diagnostics.get("preference_planning_minutes", 0), len(reviewed.candidates)) > (
+                selected_minutes, len(selected.candidates))
+            changed = set(reviewed.candidate_priority) != set(identifiers)
+            reviewed.diagnostics.update(selection_calls=2, selection_repair_attempted=True,
+                                        selection_repair_status="improved" if greater else "revised" if changed else "unchanged")
+            # Even a smaller reviewed subset may remove a forbidden/duplicate
+            # initial choice. Volume never overrides the complete current audit.
+            selected = reviewed
     selected.warnings = list(dict.fromkeys([*warnings, *selected.warnings]))
     return selected

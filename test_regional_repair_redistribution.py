@@ -83,9 +83,10 @@ class RegionalRepairRedistributionTests(unittest.TestCase):
             self.assertEqual(merged.days[number - 1].model_dump(), before["days"][number - 1])
         self.assertEqual(source.model_dump(), before)
 
-    def test_initial_prompt_prioritizes_coverage_before_extra_visits(self):
-        self.assertIn("для каждой даты из request_rules.dates", GROUNDED_SYSTEM_PROMPT)
-        self.assertIn("только после этого добавляй вторые и третьи", GROUNDED_SYSTEM_PROMPT)
+    def test_initial_prompt_requires_daily_depth_not_one_short_visit(self):
+        self.assertIn("program_depth_target_minutes", GROUNDED_SYSTEM_PROMPT)
+        self.assertIn("Одно короткое посещение — не готовая программа дня", GROUNDED_SYSTEM_PROMPT)
+        self.assertNotIn("только после этого добавляй вторые и третьи", GROUNDED_SYSTEM_PROMPT)
 
 
 if __name__ == "__main__":

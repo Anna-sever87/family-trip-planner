@@ -23,6 +23,18 @@ class DeterministicIntegrationTests(unittest.TestCase):
             item.record["category"] = "tourism"
         center = {"lat": 55.0, "lon": 83.0, "name": "Тестгород", "country_code": "RU"}
 
+        if repair_response is not None:
+            # Fixtures explicitly classify omitted IDs during the one complete
+            # review. Malformed/inconsistent reviews have dedicated boundary
+            # tests; unknown selected IDs remain invalid here as before.
+            reviewed = json.loads(repair_response)
+            reserve = candidate_result.candidates if candidate_result is not None else candidates
+            reviewed["candidate_decisions"] = {
+                item.candidate_id: "include" if item.candidate_id in reviewed["candidate_ids"]
+                else "not_standalone_visit" for item in reserve
+            }
+            repair_response = json.dumps(reviewed)
+
         def ground(req, resolved, *, completion, **kwargs):
             for _ in range(discovery_calls):
                 completion([{"role": "user", "content": "Synthetic names only"}])
@@ -161,7 +173,8 @@ class DeterministicIntegrationTests(unittest.TestCase):
         self.assertEqual(initial["planning_depth"]["required_planning_minutes"], 1890)
         self.assertEqual(review["depth_review"]["selected_planning_minutes"], 90 + 45 + 120 + 90 + 90)
         self.assertEqual(review["depth_review"]["selected_candidate_ids"], first)
-        self.assertEqual(set(completion.call_args.kwargs["json_schema"]["properties"]), {"status", "candidate_ids"})
+        self.assertEqual(set(completion.call_args.kwargs["json_schema"]["properties"]),
+                         {"status", "candidate_ids", "candidate_decisions"})
 
     def test_depth_review_never_exceeds_remaining_total_completion_budget(self):
         value, pool, first, _ = self.depth_fixture()

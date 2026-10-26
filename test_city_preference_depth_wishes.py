@@ -13,8 +13,13 @@ from test_city_deterministic import candidates, request
 from yandex_ai import YandexAIError
 
 
-def response(ids, status="selected"):
-    return SimpleNamespace(text=json.dumps({"status": status, "candidate_ids": ids}, ensure_ascii=False))
+def response(ids, status="selected", *, pool=None, excluded_reason="not_standalone_visit"):
+    value = {"status": status, "candidate_ids": ids}
+    if pool is not None:
+        value["candidate_decisions"] = {
+            item.candidate_id: "include" if item.candidate_id in ids else excluded_reason for item in pool
+        }
+    return SimpleNamespace(text=json.dumps(value, ensure_ascii=False))
 
 
 def family_pool():
@@ -56,7 +61,7 @@ class CityPreferenceDepthWishesTests(unittest.TestCase):
         # The model still rejects a broad attraction and one commercial branch.
         reviewed = [item.candidate_id for index, item in enumerate(pool) if index not in (3, 17)]
         before = deepcopy((value, pool))
-        completion = Mock(side_effect=[response(first), response(reviewed)])
+        completion = Mock(side_effect=[response(first), response(reviewed, pool=pool)])
         result = select_city_preferences(value, pool, memory_context="Справочная память",
                                          completion=completion, allow_depth_repair=True)
         self.assertEqual((result.status, result.candidate_priority), ("success", reviewed))
@@ -79,7 +84,8 @@ class CityPreferenceDepthWishesTests(unittest.TestCase):
         value, pool, _ = family_pool()
         value.wishes = "Только торговые центры, не включать музеи и зоопарки."
         selected = [pool[index].candidate_id for index in (2, 6, 8)]
-        completion = Mock(side_effect=[response(selected), response(selected)])
+        completion = Mock(side_effect=[response(selected),
+            response(selected, pool=pool, excluded_reason="current_request_restriction")])
         result = select_city_preferences(value, pool, completion=completion, allow_depth_repair=True)
         self.assertEqual(result.candidate_priority, selected)
         self.assertEqual(result.diagnostics["selection_repair_status"], "unchanged")
@@ -91,6 +97,8 @@ class CityPreferenceDepthWishesTests(unittest.TestCase):
 
     def test_failed_refused_or_invalid_review_keeps_initial_subset_and_no_third_call(self):
         value, pool, first = family_pool()
+        # Refusal without the required per-ID decisions is incomplete. A valid
+        # complete refusal is handled separately in complete-review tests.
         bad = [YandexAIError("Synthetic unavailable provider"), response([], "unsupported_preferences"),
                response([], "insufficient_data"), response(["osm-node-999999999999"]),
                response(first + [first[0]])]
@@ -108,7 +116,8 @@ class CityPreferenceDepthWishesTests(unittest.TestCase):
         value, pool, _ = family_pool()
         value.wishes = "Без торговых центров. Музеи и парки."
         selected = [pool[1].candidate_id, pool[4].candidate_id]
-        completion = Mock(side_effect=[response(selected), response([item.candidate_id for item in pool])])
+        completion = Mock(side_effect=[response(selected),
+            response([item.candidate_id for item in pool], pool=pool)])
         result = select_city_preferences(value, pool, completion=completion, allow_depth_repair=True)
         self.assertEqual(result.candidate_priority, selected)
         self.assertEqual(result.diagnostics["selection_repair_status"], "failed")
@@ -128,7 +137,7 @@ class CityPreferenceDepthWishesTests(unittest.TestCase):
     def test_review_itself_remains_bounded_even_when_reserve_stays_too_small(self):
         value, pool, first = family_pool()
         reviewed = first + [pool[4].candidate_id]
-        completion = Mock(side_effect=[response(first), response(reviewed)])
+        completion = Mock(side_effect=[response(first), response(reviewed, pool=pool)])
         result = select_city_preferences(value, pool, completion=completion, allow_depth_repair=True)
         self.assertEqual(result.candidate_priority, reviewed)
         self.assertTrue(result.diagnostics["selection_depth_shortfall"])

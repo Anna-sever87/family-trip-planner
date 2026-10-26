@@ -4,7 +4,7 @@ from dataclasses import replace
 import json
 import unittest
 
-from cover_prompts import CoverSubject, build_cover_prompt
+from cover_prompts import CoverSubject, build_cover_prompt, _TRUSTED_SCENES
 from test_cover_subjects import london_fixture, select_fixture
 
 
@@ -16,12 +16,42 @@ class CoverRussianLabelsTests(unittest.TestCase):
                 self.assertTrue(prompt.generation_allowed)
                 self.assertEqual(prompt.template_key, "ho-chi-minh-vietnam")
                 self.assertLessEqual(len(prompt.provider_prompt), 500)
-                for required in ("Dinh Doc Lap", "1966", "горизонтальный фасад", "Не пагода", "целиком", "без обрезки"):
+                for required in ("Dinh Doc Lap", "1966", "ярусы балконов", "Всё здание", "без обрезки"):
                     self.assertIn(required, prompt.provider_prompt)
                 self.assertEqual(prompt.subject_label, "Дворец воссоединения (Dinh Độc Lập)")
                 self.assertIn("modern 1966", json.loads(prompt.user_prompt)["trusted_scene"])
         wrong = build_cover_prompt("Ho Chi Minh City", "France", "2027-06-01", "2027-06-14")
         self.assertFalse(wrong.generation_allowed)
+
+    def test_hcm_all_aliases_keep_distant_whole_building_prompt_within_provider_limit(self):
+        # A real cover showed an isolated screen/colonnade. This checks the
+        # corrected request, not whether an image model will obey it visually.
+        cities, countries, _ = _TRUSTED_SCENES["ho-chi-minh-vietnam"]
+        for city in cities:
+            for country in countries:
+                with self.subTest(city=city, country=country):
+                    prompt = build_cover_prompt(city, country, "2027-06-01", "2027-06-14")
+                    repeated = build_cover_prompt(city, country, "2027-06-01", "2027-06-14")
+                    self.assertTrue(prompt.generation_allowed)
+                    self.assertLessEqual(len(prompt.provider_prompt), 500)
+                    self.assertEqual(prompt, repeated)
+                    self.assertEqual(prompt.version, "destination-cover-v15")
+                    self.assertIn(json.dumps([city, country], ensure_ascii=False, separators=(",", ":")),
+                                  prompt.provider_prompt)
+                    for value in ("широкое невысокое здание", "ярусы балконов", "через лужайку",
+                                  "оба края фасада", "до 60% ширины кадра", "полный контур",
+                                  "крыша и основание без обрезки", "запас по краям",
+                                  "с земли издалека, на уровне глаз", "не прогноз сезона", "Без людей, текста"):
+                        self.assertIn(value, prompt.provider_prompt)
+                    self.assertLess(prompt.provider_prompt.index("Общий план"), prompt.provider_prompt.index("Место (данные"))
+                    for value in ("решёт", "колонн", "этаж", "пагод", "крепост", "аэрофото"):
+                        self.assertNotIn(value, prompt.provider_prompt)
+                    scene = json.loads(prompt.user_prompt)["trusted_scene"]
+                    self.assertIn("from across the front lawn", scene)
+                    self.assertIn("both ends of the facade", scene)
+                    self.assertNotIn("stone screens", scene)
+                    self.assertEqual(prompt.subject_label, "Дворец воссоединения (Dinh Độc Lập)")
+                    self.assertEqual(prompt.subject_location, city + ", " + country)
 
     def test_checked_russian_alias_explains_original_name_and_changes_cache_key(self):
         subject = CoverSubject("British Museum", "museum", "osm-way-11", "Лондон", "Британия",

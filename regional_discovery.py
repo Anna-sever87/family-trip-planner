@@ -234,6 +234,7 @@ def discover_town(scope, result, *, near_bases=()):
 def category_records(request, scope, base, result):
     """Up to three requested named categories around one verified local base."""
     from city_candidates import CityCandidateResult, _CATEGORY_FILTERS, _category_search, _canonical_record
+    from rules import _CHILD_WORD_RE
     if not administrative_scope(scope):
         return []
     address = base.get('map_address', {})
@@ -242,15 +243,25 @@ def category_records(request, scope, base, result):
     center = {'lat':base['lat'], 'lon':base['lon'], 'country_code':address['country_code'].lower()}
     categories = list(dict.fromkeys([category for category in request.interest_categories
                                      if category in _CATEGORY_FILTERS] + ['museums', 'parks', 'main_sights']))[:3]
-    records = []
+    batches = []
+    seen_queries = set()
     for category in categories:
         if not _reserve(result):
             break
         scratch = CityCandidateResult()
+        records = []
         for proposal in _category_search(category, scope.country, center, scratch):
             record = _canonical_record(proposal['title'], proposal['record'], center)
-            if record is not None and inside_admin(record, scope):
+            query_key = places._normalized_label(record.get('place_query', '')) if record is not None else ''
+            if (record is not None and inside_admin(record, scope) and query_key not in seen_queries
+                    and (request.children_ages or not _CHILD_WORD_RE.search(record['place_query'].split(',', 1)[0]))):
                 records.append(record)
+                seen_queries.add(query_key)
+        batches.append(records)
         if scratch.diagnostics.get('category_fallback_status') == 'unavailable':
             _issue(result, 'category_search_unavailable')
-    return records
+    # The caller has one shared POI cap. Interleave observed categories so a
+    # long list of short monuments cannot consume every slot before museums.
+    # Every record still passes the same final identity/geography checks.
+    return [batch[index] for index in range(max(map(len, batches), default=0))
+            for batch in batches if index < len(batch)]

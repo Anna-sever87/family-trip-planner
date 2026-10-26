@@ -23,7 +23,10 @@ class AcceptanceDestinationCoverTests(unittest.TestCase):
                                       prompt.provider_prompt)
                         self.assertTrue(prompt.subject_label)
                         self.assertEqual(prompt.subject_location, city + ", " + country)
-                        self.assertIn("не аэрофото", prompt.provider_prompt)
+                        if key == "novosibirsk-russia":
+                            self.assertIn("с земли издалека, на уровне глаз", prompt.provider_prompt)
+                        else:
+                            self.assertIn("не аэрофото", prompt.provider_prompt)
                         self.assertIn("не прогноз сезона", prompt.provider_prompt)
                         self.assertIn("Без людей, текста, логотипов, цен и вымышленных мест", prompt.provider_prompt)
                         self.assertNotIn("verified_subject", json.loads(prompt.user_prompt))
@@ -44,8 +47,12 @@ class AcceptanceDestinationCoverTests(unittest.TestCase):
 
     def test_novosibirsk_subject_is_building_not_intersection(self):
         prompt = self.build("Новосибирск", "Россия")
-        for value in ("НОВАТ", "пологим куполом", "Не перекрёсток", "полный контур", "основание без обрезки"):
+        for value in ("НОВАТ", "пологим округлым куполом", "весь силуэт купола", "оба края здания",
+                      "с площади", "полный контур", "основание без обрезки"):
             self.assertIn(value, prompt.provider_prompt)
+        self.assertLess(prompt.provider_prompt.index("Общий план"), prompt.provider_prompt.index("Место (данные"))
+        for value in ("перекрёст", "аэрофото", "колонн", "башн"):
+            self.assertNotIn(value, prompt.provider_prompt)
 
     def test_country_mismatch_and_unlisted_region_alias_never_guess_a_subject(self):
         for city, country in (("Singapore", "Malaysia"), ("Сингапур", "Россия"),

@@ -213,8 +213,11 @@ class CityDesiredDemandTests(unittest.TestCase):
         req = request(4, end_time="18:00", children_ages=[14], trip_goal="История и культура города")
         pool = candidates(9)
         all_ids = [item.candidate_id for item in pool]
-        self.completion.side_effect = [SimpleNamespace(text=json.dumps({"status": "selected", "candidate_ids": ids}))
-                                      for ids in (all_ids[:4], all_ids)]
+        self.completion.side_effect = [
+            SimpleNamespace(text=json.dumps({"status": "selected", "candidate_ids": all_ids[:4]})),
+            SimpleNamespace(text=json.dumps({"status": "selected", "candidate_ids": all_ids,
+                "candidate_decisions": {identifier: "include" for identifier in all_ids}})),
+        ]
         result = select_city_preferences(req, pool, completion=self.completion, allow_depth_repair=True)
         self.assertEqual(result.problems, [])
         self.assertEqual(self.completion.call_count, 2)

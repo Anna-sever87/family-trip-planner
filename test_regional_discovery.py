@@ -149,6 +149,118 @@ class RegionalDiscoveryTests(unittest.TestCase):
             self.network.side_effect=[response([raw(row)]),response([]),response([])]
             self.assertEqual(discovery.category_records(req(),scope(),base(),counter()),[])
 
+    def test_shared_limit_keeps_categories_balanced_instead_of_starving_museums(self):
+        request=req().model_copy(update={'interest_categories':['main_sights','parks','museums']})
+        batches=[]
+        for category_index,kind in enumerate(('attraction','park','museum')):
+            batch=[]
+            for index in range(8):
+                row=record(f'Объект {category_index} номер {index}',kind=kind,identity=400+category_index*20+index)
+                if kind=='park':row['category']='leisure'
+                batch.append(raw(row))
+            batches.append(response(batch))
+        self.network.side_effect=batches
+        result=counter()
+        rows=discovery.category_records(request,scope(),base(),result)
+        selected=rows[:18]
+        self.assertEqual([row['type'] for row in selected],['attraction','park','museum']*6)
+        self.assertEqual((result.regional_discovery_calls,self.network.call_count),(3,3))
+
+    def test_round_robin_balances_usable_categories_after_duplicates_and_adult_filter(self):
+        request=req().model_copy(update={'interest_categories':['main_sights','parks','museums'], 'children_ages':[]})
+        groups=[]
+        for category_index,kind in enumerate(('attraction','park','museum')):
+            group=[]
+            for index in range(8):
+                row=record(f'Объект {category_index} номер {index}',kind=kind,identity=500+category_index*20+index)
+                if kind=='park':row['category']='leisure'
+                group.append(row)
+            if kind=='museum':
+                duplicate=deepcopy(group[0]);duplicate['osm_id']=999
+                group[:0]=[duplicate,record('Детский музей',kind='museum',identity=998)]
+            groups.append(response([raw(row) for row in group]))
+        self.network.side_effect=groups
+        result=counter()
+        selected=discovery.category_records(request,scope(),base(),result)[:18]
+        self.assertEqual([row['type'] for row in selected],['attraction','park','museum']*6)
+        self.assertEqual(len({row['place_query'] for row in selected}),18)
+        self.assertEqual((result.regional_discovery_calls,self.network.call_count),(3,3))
+
+    def warm_short_pool(self):
+        request=req().model_copy(update={'interest_categories':['main_sights','parks','museums'], 'start_time':'09:00','end_time':'18:00'})
+        result=counter();result.base_facts=[base()]
+        for index in range(18):
+            row=record(f'Памятный объект номер {index}',kind='attraction',identity=600+index)
+            canonical=city_candidates._canonical_record(row['name'].split(',')[0],row,{'lat':51.,'lon':101.,'country_code':'ru'})
+            fact,reason=grounding._confirmed_fact(canonical['place_query'].split(',')[0],canonical,{'base_1':base()},scope(),result)
+            self.assertIsNotNone(fact,reason);result.confirmed_hints.append(fact)
+        return request,result
+
+    def test_warm_full_short_pool_is_rebalanced_within_same_http_and_candidate_caps(self):
+        request,result=self.warm_short_pool()
+        first=result.confirmed_hints[0]['place_query']
+        self.assertTrue(grounding._regional_needs_reserve(request,result,14))
+        groups=[]
+        for category_index,kind in enumerate(('attraction','park','museum')):
+            rows=[]
+            for index in range(8):
+                row=record(f'Новое место {category_index} номер {index}',kind=kind,identity=1000+category_index*20+index)
+                if kind=='park':row['category']='leisure'
+                rows.append(raw(row))
+            groups.append(response(rows))
+        self.network.side_effect=groups
+        with patch.object(places,'_remember_nearby_alias'):
+            grounding._regional_map_reserve(request,scope(),{'base_1':base()},result,18)
+        self.assertEqual(len(result.confirmed_hints),18)
+        self.assertEqual({kind:sum(row['map_poi_type']==kind for row in result.confirmed_hints)
+                          for kind in ('attraction','park','museum')},
+                         {'attraction':6,'park':6,'museum':6})
+        self.assertIn(first,[row['place_query'] for row in result.confirmed_hints])
+        self.assertFalse(grounding._regional_needs_reserve(request,result,14))
+        self.assertEqual((result.regional_discovery_calls,self.network.call_count),(3,3))
+        self.assertLessEqual(result.reserved_http_attempts_upper_bound,42)
+
+    def test_rebalance_preserves_grounded_model_and_literal_user_choices(self):
+        request,result=self.warm_short_pool()
+        result.confirmed_hints[-1]['original_proposal_query']=result.confirmed_hints[-1]['place_query']
+        request=request.model_copy(update={'wishes':f"Хочу посетить {result.confirmed_hints[-2]['title']}"})
+        selected=grounding._balanced_regional_hints(request,{'base_1':base()},result.confirmed_hints,3)
+        self.assertEqual({row['place_query'] for row in selected},
+                         {result.confirmed_hints[index]['place_query'] for index in (-1,-2,0)})
+
+    def test_exhausted_warm_reserve_does_not_spend_or_fabricate_new_data(self):
+        request,result=self.warm_short_pool();result.reserved_http_attempts_upper_bound=42
+        before=deepcopy(result.confirmed_hints)
+        grounding._regional_map_reserve(request,scope(),{'base_1':base()},result,18)
+        self.assertEqual(result.confirmed_hints,before)
+        self.assertEqual(result.regional_discovery_calls,0)
+        self.network.assert_not_called()
+
+    def test_unknown_cached_types_are_not_inferred_from_titles(self):
+        request,result=self.warm_short_pool()
+        for row in result.confirmed_hints:
+            row['title']='Музей '+row['title'];row.pop('map_poi_type')
+        before=deepcopy(result.confirmed_hints)
+        self.assertTrue(grounding._regional_needs_reserve(request,result,14))
+        self.assertEqual(result.confirmed_hints,before)
+
+    def test_unsupported_witness_profiles_keep_existing_count_based_reserve_rule(self):
+        request,result=self.warm_short_pool()
+        for changes in ({'children_ages':[8]}, {'interest_categories':['water_trips']}, {'pace':'спокойный'}):
+            self.assertFalse(grounding._regional_needs_reserve(request.model_copy(update=changes),result,14))
+        result.base_facts*=4
+        self.assertFalse(grounding._regional_needs_reserve(request,result,14))
+
+    def test_cached_alias_preserves_successful_proposal_by_provider_identity(self):
+        _,result=self.warm_short_pool()
+        original=result.confirmed_hints[-1]
+        alias={**original,'place_query':'Alternate museum label, Большой город, Россия'}
+        grounding._protect_grounded_proposal(result,alias,alias['place_query'],'Большой город')
+        self.assertEqual(original['original_proposal_query'],alias['place_query'])
+        other={**result.confirmed_hints[0],'osm_id':99999,'place_query':'Независимое место, Большой город, Россия'}
+        grounding._protect_grounded_proposal(result,other,other['place_query'],'Большой город')
+        self.assertNotIn('original_proposal_query',result.confirmed_hints[0])
+
     def test_map_reserve_respects_remaining_shared_http_budget(self):
         self.network.side_effect=[response([])]
         result=counter(42,41)

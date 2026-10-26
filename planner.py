@@ -17,6 +17,7 @@ from city_response import CITY_RESPONSE_FORMAT_RULE, build_city_response_schema
 from source_planning import prepare_source_plan, validate_source_edit
 from program_coverage import authorized_free_days, rebuild_program_report
 from grounded_response import build_grounded_response_schema, decode_grounded_response
+from regional_schedule_witness import check_witness, constrain_witness_schema
 from grounded_schedule import (
     GROUNDED_RESPONSE_FORMAT_RULE,
     build_grounded_messages,
@@ -3099,6 +3100,14 @@ def _regional_repair_messages(
         ],
         "current_route": source.model_dump(mode="json"),
     }
+    try:
+        witness = json.loads(base_messages[1]["content"]).get("schedule_witness")
+    except (ValueError, TypeError, AttributeError, IndexError):
+        witness = None
+    if isinstance(witness, dict) and witness.get("binding") is True:
+        counts = {day["day"]: len(day["visits"]) for day in witness.get("days", [])}
+        for requirement in payload["coverage_requirements"]:
+            requirement["minimum_attractions"] = counts.get(requirement["day"], 1)
     encoded = _sanitize_map_context_text(json.dumps(payload, ensure_ascii=False))
     instructions = (
         "РЕЖИМ ИСПРАВЛЕНИЯ РЕГИОНАЛЬНЫХ ДНЕЙ. Формат ответа в этом режиме "
@@ -3118,8 +3127,10 @@ def _regional_repair_messages(
         "эта история уже проверенных посещений закрепляет каждое место за указанным day, "
         "его нельзя переносить даже между исправляемыми днями. Подтверждение идентичности "
         "кандидата в общем пуле само по себе не закрепляет его за ошибочным днём. "
-        "Сначала обеспечь минимум одно уникальное "
-        "посещение в каждом дне coverage_requirements, затем добавляй остальные посещения. "
+        "Обеспечь minimum_attractions из coverage_requirements и требуемую содержательность каждого дня. "
+        "Если дан schedule_witness, это пример выполнимого расписания; при binding=true его набор обязателен, "
+        "при binding=false сначала соблюдай пожелания анкеты и историю закреплённых посещений. "
+        "Не заменяй содержательный день одним коротким посещением. "
         "Места из fixed_place_queries закреплены за неизменяемыми днями и недоступны для переноса. "
         "Проверь уникальность со всеми сохранёнными днями. Не подменяй выбранную территорию "
         "соседним крупным городом. Смена базы требует времени до первого посещения: "
@@ -5337,11 +5348,16 @@ def generate_itinerary(
             "content": user_prompt,
         },
     ]
+    regional_witness = None
     if grounding is not None:
         base_messages = build_grounded_messages(
             request, region_scope, grounding, max_attractions,
             constraints_text=limits_text, memory_context=prepared_memory_context,
         )
+        regional_witness = json.loads(base_messages[1]["content"]).get("schedule_witness")
+        if regional_witness is not None:
+            logger.info("Региональный плановый каркас: %s дней, %s посещений; фактические дороги/часы/цены не подтверждены",
+                        len(regional_witness["days"]), sum(len(day["visits"]) for day in regional_witness["days"]))
 
     messages = list(
         base_messages
@@ -5426,6 +5442,7 @@ def generate_itinerary(
                     if grounding is not None:
                         response_schema = constrain_grounded_schema(response_schema, grounding)
                         response_schema = build_grounded_response_schema(response_schema, request)
+                        response_schema = constrain_witness_schema(response_schema, regional_witness)
                     else:
                         response_schema = build_city_response_schema(response_schema, request)
                 except ValueError as error:
@@ -5700,6 +5717,7 @@ def generate_itinerary(
         )
         if grounding is not None:
             constraint_problems += enforce_grounded_choices(itinerary, grounding)
+            constraint_problems += check_witness(itinerary, regional_witness)
         pruned_duplicate_count = 0
         replacement_requirements: Dict[
             tuple[int, str],

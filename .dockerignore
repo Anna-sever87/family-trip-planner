@@ -49,6 +49,7 @@
 !program_coverage.py
 !prompts.py
 !regional_discovery.py
+!regional_schedule_witness.py
 !regional_routing.py
 !regional_skeleton.py
 !reminders.py
