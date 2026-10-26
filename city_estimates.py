@@ -1,4 +1,4 @@
-"""Neutral server-owned wording for the opt-in map-only city plan.
+"""Unknown-admission disclosure and neutral wording for map-only city plans.
 
 This is not a fact check of attraction descriptions or a repair of identity,
 prices, time, duration, indoor suitability, map evidence or invalid items.
@@ -15,10 +15,13 @@ UNPRICED_VISIT_LABEL = "Цена не уточнена"
 
 
 def is_unpriced_city_visit(itinerary: Itinerary, item) -> bool:
-    """Presentation only: a zero map-only reserve is not a verified free ticket."""
+    """A zero without source-backed admission is unknown, including saved regions.
+
+    Keep the historical helper name for every web, PDF and Telegram caller.
+    This read-only label does not alter prices or promote map evidence to a tariff.
+    """
     return (
-        getattr(itinerary, "city_schedule", False) is True
-        and getattr(itinerary, "source_schedule", False) is not True
+        getattr(itinerary, "source_schedule", False) is not True
         and getattr(item, "kind", "") == "attraction"
         and getattr(item, "cost", None) == 0
     )

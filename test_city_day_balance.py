@@ -215,7 +215,7 @@ class CityDesiredDemandTests(unittest.TestCase):
         all_ids = [item.candidate_id for item in pool]
         self.completion.side_effect = [
             SimpleNamespace(text=json.dumps({"status": "selected", "candidate_ids": all_ids[:4]})),
-            SimpleNamespace(text=json.dumps({"status": "selected", "candidate_ids": all_ids,
+            SimpleNamespace(text=json.dumps({"status": "selected",
                 "candidate_decisions": {identifier: "include" for identifier in all_ids}})),
         ]
         result = select_city_preferences(req, pool, completion=self.completion, allow_depth_repair=True)

@@ -125,7 +125,55 @@ def _admin_centre(region_id, scope, result, near_bases):
         return None
 
 
-def discover_town(scope, result, *, near_bases=()):
+def _different_town(lat, lon, excluded, *, title='', identity=None):
+    """Reject the same mapped settlement, not legitimate neighbouring towns."""
+    normalized = places._normalized_label(title)
+    for base in excluded:
+        names = {places._normalized_label(str(base.get(key, '')).split(',', 1)[0])
+                 for key in ('base_query', 'official_name')}
+        if (identity is not None and identity == places.map_record_identity(base)
+                or normalized and normalized in names
+                or places.distance_km(base['lat'], base['lon'], lat, lon) < .001):
+            return False
+    return True
+
+
+def discover_secondary_base(scope, result, bases):
+    """Prefer a distinct already mapped settlement, then bounded town search.
+
+    A cached village is only a map identity, never confirmed accommodation or
+    a land connection. Exact source ID, administrative address and full polygon
+    are required just as for network-derived towns.
+    """
+    from city_candidates import _provider_title
+    if not administrative_scope(scope) or not bases:
+        return None
+    try:
+        cache = places._load_cache()
+    except (OSError, ValueError, TypeError):
+        cache = {}
+    options = []
+    for row in (cache.values() if isinstance(cache, dict) else ()):
+        if (not isinstance(row, dict) or not inside_admin(row, scope)
+                or row.get('category') not in ('place', 'boundary')
+                or row.get('type') not in ('city', 'town', 'village')
+                or places.map_record_identity(row) is None):
+            continue
+        title = _provider_title(row)
+        if not title or not places._place_matches_query(f'{title}, {scope.country}', row):
+            continue
+        lat, lon = float(row['lat']), float(row['lon'])
+        distance = min(places.distance_km(base['lat'], base['lon'], lat, lon) for base in bases)
+        if distance > 100 or not _different_town(lat, lon, bases, title=title, identity=places.map_record_identity(row)):
+            continue
+        options.append((distance, title, row))
+    if options:
+        _, title, row = min(options, key=lambda item: (item[0], item[1]))
+        return {**row, 'base_query': f'{title}, {scope.country}'}
+    return discover_town(scope, result, near_bases=bases, exclude_bases=bases)
+
+
+def discover_town(scope, result, *, near_bases=(), exclude_bases=()):
     """One exact admin-centre chain, or bounded town-list + two ID lookups.
 
     All branches share the eight-call reserve and the original region's
@@ -151,7 +199,7 @@ def discover_town(scope, result, *, near_bases=()):
             if identity and identity[:2] == ('osm', 'relation'):
                 region_id = identity[2]
                 break
-    if region_id is not None:
+    if region_id is not None and not exclude_bases:
         centre = _admin_centre(region_id,scope,result,near_bases)
         if centre is not None:
             return centre
@@ -193,6 +241,8 @@ def discover_town(scope, result, *, near_bases=()):
                     continue
                 if near_bases and not any(places.distance_km(base['lat'],base['lon'],lat,lon) <= 100 for base in near_bases):
                     continue
+                if not _different_town(lat, lon, exclude_bases, title=title, identity=('osm', row['type'], row['id'])):
+                    continue
                 population = str(tags.get('population', '0')).replace(' ', '')
                 population = int(population) if population.isdigit() and len(population) <= 10 else 0
             except (KeyError, ValueError, OverflowError):
@@ -220,6 +270,8 @@ def discover_town(scope, result, *, near_bases=()):
                     or not actual or not places._place_matches_query(f'{title}, {scope.country}', record)
                     or not places._place_matches_query(f'{actual}, {scope.country}', record)
                     or not inside_admin(record, scope)
+                    or not _different_town(float(record['lat']), float(record['lon']), exclude_bases,
+                                           title=actual, identity=places.map_record_identity(record))
                     or near_bases and not any(places.distance_km(base['lat'],base['lon'],float(record['lat']),float(record['lon'])) <= 100
                                               for base in near_bases)):
                 continue
@@ -237,14 +289,42 @@ def category_records(request, scope, base, result):
     from rules import _CHILD_WORD_RE
     if not administrative_scope(scope):
         return []
+    if (result.reserved_http_attempts_upper_bound >= result.http_attempt_limit
+            or result.regional_discovery_calls >= MAX_RESERVE_CALLS):
+        return []
     address = base.get('map_address', {})
     if places._country_identity(str(address.get('country_code', ''))) != places._country_identity(scope.country):
         return []
     center = {'lat':base['lat'], 'lon':base['lon'], 'country_code':address['country_code'].lower()}
     categories = list(dict.fromkeys([category for category in request.interest_categories
                                      if category in _CATEGORY_FILTERS] + ['museums', 'parks', 'main_sights']))[:3]
-    batches = []
+    from regional_schedule_witness import _INTEREST_TYPES
+    allowed_types = set().union(*(_INTEREST_TYPES.get(category,set()) for category in categories))
+    try:
+        cache = places._load_cache()
+    except (OSError, ValueError, TypeError):
+        cache = {}
+    cached = []
     seen_queries = set()
+    # Newly discovered bases must also see their own already verified local
+    # POIs. The generic capped name hints can otherwise contain only the large
+    # city's records. This bounded cache read spends no HTTP or AI calls.
+    from itertools import islice
+    for row in islice(cache.values() if isinstance(cache,dict) else (),2000):
+        if (not isinstance(row,dict) or not isinstance(row.get('type'),str) or row['type'] not in allowed_types
+                or not inside_admin(row,scope)
+                or places.distance_km(base['lat'],base['lon'],float(row['lat']),float(row['lon'])) > 15):
+            continue
+        from city_candidates import _provider_title
+        title = _provider_title(row)
+        record = _canonical_record(title,row,center) if title else None
+        query_key = places._normalized_label(record.get('place_query','')) if record else ''
+        if (record is not None and query_key not in seen_queries
+                and (request.children_ages or not _CHILD_WORD_RE.search(title))):
+            cached.append(record);seen_queries.add(query_key)
+            if len(cached) == 18:
+                break
+    batches = [cached] if cached else []
     for category in categories:
         if not _reserve(result):
             break

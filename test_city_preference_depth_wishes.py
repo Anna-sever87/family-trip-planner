@@ -16,6 +16,7 @@ from yandex_ai import YandexAIError
 def response(ids, status="selected", *, pool=None, excluded_reason="not_standalone_visit"):
     value = {"status": status, "candidate_ids": ids}
     if pool is not None:
+        value.pop("candidate_ids")
         value["candidate_decisions"] = {
             item.candidate_id: "include" if item.candidate_id in ids else excluded_reason for item in pool
         }
@@ -64,7 +65,9 @@ class CityPreferenceDepthWishesTests(unittest.TestCase):
         completion = Mock(side_effect=[response(first), response(reviewed, pool=pool)])
         result = select_city_preferences(value, pool, memory_context="Справочная память",
                                          completion=completion, allow_depth_repair=True)
-        self.assertEqual((result.status, result.candidate_priority), ("success", reviewed))
+        expected = [identifier for identifier in first if identifier in reviewed]
+        expected += [identifier for identifier in reviewed if identifier not in expected]
+        self.assertEqual((result.status, result.candidate_priority), ("success", expected))
         self.assertEqual(result.diagnostics["selection_calls"], 2)
         self.assertEqual(result.diagnostics["selection_repair_status"], "improved")
         self.assertFalse(result.diagnostics["selection_depth_shortfall"])
@@ -121,6 +124,7 @@ class CityPreferenceDepthWishesTests(unittest.TestCase):
         result = select_city_preferences(value, pool, completion=completion, allow_depth_repair=True)
         self.assertEqual(result.candidate_priority, selected)
         self.assertEqual(result.diagnostics["selection_repair_status"], "failed")
+        self.assertEqual(result.diagnostics["selection_review_failure_reason"], "shopping_request_mismatch")
         self.assertFalse(any(item.record["category"] == "shop" for item in result.candidates))
         self.assertEqual(completion.call_count, 2)
 

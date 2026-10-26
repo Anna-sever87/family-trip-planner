@@ -995,7 +995,8 @@ function renderTripNotes() {
 }
 
 function isUnpricedCityVisit(itinerary, item) {
-  return itinerary.city_schedule === true && itinerary.source_schedule !== true
+  // Saved regional/legacy routes also have no verified tariff for a zero reserve.
+  return itinerary.source_schedule !== true
     && item.kind === "attraction" && item.cost === 0;
 }
 

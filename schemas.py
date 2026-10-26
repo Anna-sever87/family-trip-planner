@@ -1,8 +1,9 @@
 """Модели данных: запрос на поездку и готовый маршрут."""
 from datetime import date
+import re
 from typing import List, Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 INTEREST_LABELS = {
@@ -77,6 +78,25 @@ class ItineraryItem(BaseModel):
     official_name: str = ""
     provider: str = ""                   # app-only map provenance; never trusted from AI
     source_url: str = ""
+
+    @field_validator("description")
+    @classmethod
+    def remove_repeated_visit_clock(cls, value, info):
+        """Keep planned visit times in the structured timeline, including old trips.
+
+        Only the generated visit-time clause is removed. Opening hours and
+        transfer descriptions stay intact; parsing does not rewrite storage.
+        """
+        if info.data.get("kind", "attraction") != "attraction":
+            return value
+        clock = r"(?:[01]\d|2[0-3]):[0-5]\d"
+        cleaned = re.sub(r"(?:^|,\s*)посещение\s+с\s+" + clock +
+                         r"\s+до\s+" + clock + r"(?=\s*(?:[.;]|$))", "", value,
+                         flags=re.IGNORECASE)
+        if cleaned == value:
+            return value
+        cleaned = cleaned.strip(" ,;.")
+        return (cleaned + ".") if cleaned else "Время посещения указано в расписании."
 
 
 class ItineraryDay(BaseModel):

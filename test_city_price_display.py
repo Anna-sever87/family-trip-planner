@@ -1,4 +1,4 @@
-"""Unknown map-only admission prices stay visible without changing any numbers."""
+"""Unknown admission prices stay visible in city and saved regional routes."""
 
 from copy import deepcopy
 import io
@@ -15,7 +15,7 @@ except ImportError:
 
 import web_service
 from city_estimates import (
-    UNPRICED_VISIT_LABEL, city_unpriced_visit_note, is_unpriced_city_visit,
+    UNPRICED_VISIT_LABEL, budget_coverage, city_unpriced_visit_note, is_unpriced_city_visit,
     unpriced_city_visit_count,
 )
 from formatting import format_itinerary
@@ -47,7 +47,7 @@ class CityPriceDisplayTests(unittest.TestCase):
             self.addCleanup(blocker.stop)
             self.addCleanup(mock.assert_not_called)
 
-    def test_unknown_count_is_city_zero_attractions_only_without_mutation(self):
+    def test_unknown_count_is_zero_attractions_only_without_mutation(self):
         _, itinerary = price_fixture()
         before = deepcopy(itinerary.model_dump())
         self.assertEqual([is_unpriced_city_visit(itinerary, item) for item in itinerary.days[0].items],
@@ -58,21 +58,33 @@ class CityPriceDisplayTests(unittest.TestCase):
         self.assertIn("не означает бесплатный вход", city_unpriced_visit_note(itinerary))
         self.assertEqual(itinerary.model_dump(), before)
 
-    def test_legacy_source_and_no_unknown_prices_do_not_gain_the_city_disclosure(self):
-        for flags in ({"city_schedule": False}, {"city_schedule": False, "source_schedule": True},
+    def test_source_and_no_unknown_prices_do_not_gain_the_disclosure(self):
+        for flags in ({"city_schedule": False, "source_schedule": True},
                       {"city_schedule": True, "source_schedule": True}):
             with self.subTest(flags=flags):
                 _, itinerary = price_fixture()
                 itinerary = itinerary.model_copy(update=flags)
                 self.assertEqual(unpriced_city_visit_count(itinerary), 0)
                 self.assertEqual(city_unpriced_visit_note(itinerary), "")
-        legacy = SimpleNamespace(days=[SimpleNamespace(items=[SimpleNamespace(kind="attraction", cost=0)])])
-        self.assertEqual(city_unpriced_visit_note(legacy), "")
         _, itinerary = price_fixture()
         for item in itinerary.days[0].items:
             if item.kind == "attraction":
                 item.cost = 300
         self.assertEqual(city_unpriced_visit_note(itinerary), "")
+
+    def test_legacy_flags_and_verified_map_coordinates_do_not_confirm_free_admission(self):
+        for flags in ({}, {"city_schedule": False}, {"source_schedule": False},
+                      {"city_schedule": False, "source_schedule": False},
+                      {"source_schedule": "true"}):
+            with self.subTest(flags=flags):
+                visit = SimpleNamespace(kind="attraction", cost=0, verified=True,
+                                        lat=61.78, lon=34.35, provider="osm")
+                legacy = SimpleNamespace(days=[SimpleNamespace(items=[visit])], **flags)
+                before = deepcopy(vars(legacy))
+                self.assertTrue(is_unpriced_city_visit(legacy, visit))
+                self.assertEqual(unpriced_city_visit_count(legacy), 1)
+                self.assertIn("Посещений с неуточнённой ценой: 1.", city_unpriced_visit_note(legacy))
+                self.assertEqual(vars(legacy), before)
 
     def test_telegram_labels_exactly_unknown_visits_and_preserves_totals(self):
         request, itinerary = price_fixture()
@@ -89,14 +101,45 @@ class CityPriceDisplayTests(unittest.TestCase):
         self.assertIn("Остаток бюджета: 6700 RUB", text)
         self.assertEqual(itinerary.model_dump(), before)
 
-    def test_telegram_legacy_and_source_keep_the_original_zero_display(self):
+    def test_telegram_legacy_zero_visits_are_unknown_and_source_zero_is_unchanged(self):
         for source in (False, True):
             _, itinerary = price_fixture()
             itinerary.city_schedule, itinerary.source_schedule = False, source
+            before = deepcopy(itinerary.model_dump())
             text = format_itinerary(itinerary, "RUB", 10000, travel_cost=1000, lodging_cost=2000)
-            self.assertNotIn(UNPRICED_VISIT_LABEL, text)
-            self.assertNotIn("Посещений с неуточнённой ценой", text)
+            self.assertEqual(text.count(UNPRICED_VISIT_LABEL), 0 if source else 2)
+            self.assertEqual("Посещений с неуточнённой ценой" in text, not source)
             self.assertIn("Итого запланировано: около 3300 RUB", text)
+            self.assertEqual(itinerary.model_dump(), before)
+
+    def test_saved_regional_read_adds_admission_disclosure_without_repricing_or_rewriting(self):
+        request, itinerary = price_fixture()
+        request.destination_kind = "region"
+        itinerary.city_schedule = False
+        itinerary.days[0].base_area = "Учебная база"
+        itinerary.days[0].transfer_note = "Переезд требует отдельной проверки."
+        itinerary.days[0].items.append(ItineraryItem(
+            kind="transport", time="15:00", title="Переезд", description="Учебный переезд.",
+            cost=0, duration_min=60))
+        before = deepcopy(itinerary.model_dump())
+        trip = {"id": 30, "request": request.model_dump(), "revision": 1}
+        with patch.object(web_service, "_validated_trip", return_value=(trip, request, itinerary)), \
+                patch.object(web_service.db, "get_checklist", return_value=[]), \
+                patch.object(web_service.db, "get_reminder_statuses", return_value=[]), \
+                patch.object(web_service.reminders, "describe_plan", return_value=""):
+            detail = web_service.get_trip_detail(1, 30)
+        self.assertEqual(detail["budget"]["unpriced_visit_count"], 2)
+        self.assertEqual(detail["itinerary"]["unpriced_visit_note"], city_unpriced_visit_note(itinerary))
+        self.assertIn(city_unpriced_visit_note(itinerary), detail["budget"]["scope_note"])
+        coverage = budget_coverage(request, itinerary)
+        self.assertEqual([entry["code"] for entry in coverage["missing"]], ["admission"])
+        self.assertEqual(coverage["status"], "incomplete")
+        self.assertEqual((detail["budget"]["program_total"], detail["budget"]["planned_total"],
+                          detail["budget"]["remaining"]), (300, 3300, 6700))
+        self.assertEqual([item["cost"] for item in detail["itinerary"]["days"][0]["items"]],
+                         [0, 0, 300, 0, 0, 0])
+        self.assertEqual(itinerary.model_dump(), before)
+        self.assertEqual(trip, {"id": 30, "request": request.model_dump(), "revision": 1})
 
     def test_web_detail_exposes_count_note_and_unchanged_numeric_budget(self):
         request, itinerary = price_fixture()
@@ -115,7 +158,7 @@ class CityPriceDisplayTests(unittest.TestCase):
         self.assertEqual([item["cost"] for item in detail["itinerary"]["days"][0]["items"]], [0, 0, 300, 0, 0])
         self.assertEqual(itinerary.model_dump(), before)
 
-    def test_web_scope_note_keeps_legacy_source_and_other_cost_warnings(self):
+    def test_web_scope_note_keeps_source_and_other_cost_warnings_and_discloses_legacy(self):
         request, itinerary = price_fixture()
         request.travel_cost = 0
         note = web_service._budget_scope_note(request, itinerary)
@@ -124,7 +167,8 @@ class CityPriceDisplayTests(unittest.TestCase):
         itinerary.city_schedule = False
         for source in (False, True):
             itinerary.source_schedule = source
-            self.assertNotIn("Посещений с неуточнённой ценой", web_service._budget_scope_note(request, itinerary))
+            self.assertEqual("Посещений с неуточнённой ценой" in
+                             web_service._budget_scope_note(request, itinerary), not source)
 
     @unittest.skipIf(PdfReader is None, "Run with bundled dependencies for PDF extraction")
     def test_pdf_labels_unknown_admission_and_keeps_original_totals_and_payload(self):
@@ -142,17 +186,19 @@ class CityPriceDisplayTests(unittest.TestCase):
         self.assertEqual(len(reader.pages), 2)
 
     @unittest.skipIf(PdfReader is None, "Run with bundled dependencies for PDF extraction")
-    def test_pdf_legacy_and_source_zero_prices_stay_unchanged(self):
+    def test_pdf_legacy_zero_visits_are_unknown_and_source_prices_stay_unchanged(self):
         request, itinerary = price_fixture()
         itinerary.city_schedule = False
         for source in (False, True):
             itinerary.source_schedule = source
-            reader = PdfReader(io.BytesIO(build_trip_pdf(
-                {"request": request.model_dump(), "itinerary": itinerary.model_dump()}, [])))
+            trip = {"request": request.model_dump(), "itinerary": itinerary.model_dump()}
+            before = deepcopy(trip)
+            reader = PdfReader(io.BytesIO(build_trip_pdf(trip, [])))
             text = " ".join("\n".join(page.extract_text() for page in reader.pages).split())
-            self.assertNotIn(UNPRICED_VISIT_LABEL, text)
-            self.assertNotIn("Посещений с неуточнённой ценой", text)
+            self.assertEqual(text.count(UNPRICED_VISIT_LABEL), 0 if source else 2)
+            self.assertEqual("Посещений с неуточнённой ценой" in text, not source)
             self.assertIn("3 300 RUB", text)
+            self.assertEqual(trip, before)
 
 
 if __name__ == "__main__":

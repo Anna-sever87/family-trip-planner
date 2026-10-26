@@ -18,7 +18,7 @@ from source_planning import prepare_source_plan, validate_source_edit
 from program_coverage import authorized_free_days, rebuild_program_report
 from grounded_response import (build_grounded_response_schema, decode_grounded_response, grounded_query_feedback,
                                freeze_grounded_catalog, build_grounded_id_schema, decode_grounded_id_response)
-from regional_schedule_witness import check_witness, constrain_witness_schema
+from regional_schedule_witness import check_witness, constrain_witness_schema, regional_coverage
 from grounded_schedule import (
     GROUNDED_RESPONSE_FORMAT_RULE,
     build_grounded_messages,
@@ -5279,7 +5279,8 @@ def generate_itinerary(
                         source_plan.status, len(problems))
             return PlanResult(itinerary=itinerary, problems=problems, attempts=grounding_calls,
                               prompt_tokens=grounding.input_tokens, completion_tokens=grounding.output_tokens,
-                              weather_text=weather_text, weather=weather)
+                              weather_text=weather_text, weather=weather,
+                              generation_coverage=regional_coverage(request, itinerary, grounding))
 
         # Free days are constructed only by the source-backed scheduler. The
         # model-only path cannot grant itself a quality exemption via metadata.
@@ -5966,6 +5967,9 @@ def generate_itinerary(
             0 if map_checked else 1,
             len(problems),
         )
+
+        if grounding is not None:
+            candidate.generation_coverage = regional_coverage(request, itinerary, grounding)
 
         if (
             best_rank is None

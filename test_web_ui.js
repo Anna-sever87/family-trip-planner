@@ -495,10 +495,10 @@ test("budget separates each day's running total from the whole-trip estimate and
   assert.equal(JSON.stringify(ui.state.trip), before);
 });
 
-test("legacy, source and nonvisit zero costs never gain an unknown admission label", () => {
+test("source-backed and nonvisit zero costs never gain an unknown admission label", () => {
   const ui = browser();
-  for (const flags of [{}, { city_schedule: false, source_schedule: true },
-    { city_schedule: true, source_schedule: true }, { city_schedule: "true", source_schedule: false }]) {
+  for (const flags of [{ city_schedule: false, source_schedule: true },
+    { city_schedule: true, source_schedule: true }, { source_schedule: true }]) {
     ui.state.trip = detailTrip();
     Object.assign(ui.state.trip.itinerary, flags);
     ui.state.trip.itinerary.days[0].items = [{ kind: "attraction", title: "Музей", time: "09:00", cost: 0 }];
@@ -515,6 +515,40 @@ test("legacy, source and nonvisit zero costs never gain an unknown admission lab
   ui.originalRenderTrip();
   assert.equal(ui.context.cityUnpricedVisitNote(ui.state.trip.itinerary), "");
   assert.ok(!elementText(ui.element("timeline")).includes("Цена не уточнена"));
+});
+
+test("saved regional and legacy visits show unknown admission on read without altering numbers or pauses", () => {
+  const ui = browser();
+  for (const flags of [{}, { city_schedule: false }, { source_schedule: false },
+    { city_schedule: false, source_schedule: false }, { source_schedule: "true" }]) {
+    ui.state.trip = detailTrip(30);
+    ui.state.trip.destination_kind = "region";
+    ui.state.trip.request.destination_kind = "region";
+    Object.assign(ui.state.trip.itinerary, flags);
+    Object.assign(ui.state.trip.itinerary.days[0], { base_area: "Учебная база", transfer_note: "Переезд требует проверки." });
+    ui.state.trip.itinerary.days[0].items = [
+      { kind: "attraction", title: "Музей без тарифа", time: "09:00", cost: 0, verified: true, lat: 61.78, lon: 34.35 },
+      { kind: "attraction", title: "Оценённое посещение", time: "11:00", cost: 300 },
+      { kind: "meal", title: "Обед", time: "13:00", cost: 0 },
+      { kind: "rest", title: "Отдых", time: "14:00", cost: 0 },
+      { kind: "transport", title: "Переезд", time: "15:00", cost: 0 },
+    ];
+    Object.assign(ui.state.trip.budget, { currency: "RUB", program_total: 300, planned_total: 25300, remaining: 34700 });
+    ui.state.selectedDay = 1;
+    const before = JSON.stringify(ui.state.trip);
+    ui.originalRenderTrip();
+    const timeline = ui.element("timeline");
+    assert.equal((elementText(timeline).match(/Цена не уточнена/g) || []).length, 1);
+    assert.equal(timeline.children[0].children[2].textContent, "Цена не уточнена");
+    assert.equal(timeline.children[1].children[2].textContent, ui.context.formatMoney(300, "RUB"));
+    for (const row of timeline.children.slice(2)) assert.equal(row.children[2].textContent, "");
+    for (const id of ["tripNotes", "budgetPanel"]) {
+      assert.ok(elementText(ui.element(id)).includes("Посещений с неуточнённой ценой: 1."));
+      assert.ok(elementText(ui.element(id)).includes("не означает бесплатный вход"));
+    }
+    assert.ok(elementText(ui.element("budgetPanel")).includes(ui.context.formatMoney(25300, "RUB")));
+    assert.equal(JSON.stringify(ui.state.trip), before, "display must not rewrite a saved regional route");
+  }
 });
 
 test("region hint and route header disclose the lake shoreline margin without changing city copy", () => {

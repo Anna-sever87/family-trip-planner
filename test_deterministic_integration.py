@@ -29,8 +29,9 @@ class DeterministicIntegrationTests(unittest.TestCase):
             # tests; unknown selected IDs remain invalid here as before.
             reviewed = json.loads(repair_response)
             reserve = candidate_result.candidates if candidate_result is not None else candidates
+            reviewed_ids = reviewed.pop("candidate_ids")
             reviewed["candidate_decisions"] = {
-                item.candidate_id: "include" if item.candidate_id in reviewed["candidate_ids"]
+                item.candidate_id: "include" if item.candidate_id in reviewed_ids
                 else "not_standalone_visit" for item in reserve
             }
             repair_response = json.dumps(reviewed)
@@ -174,7 +175,7 @@ class DeterministicIntegrationTests(unittest.TestCase):
         self.assertEqual(review["depth_review"]["selected_planning_minutes"], 90 + 45 + 120 + 90 + 90)
         self.assertEqual(review["depth_review"]["selected_candidate_ids"], first)
         self.assertEqual(set(completion.call_args.kwargs["json_schema"]["properties"]),
-                         {"status", "candidate_ids", "candidate_decisions"})
+                         {"status", "candidate_decisions"})
 
     def test_depth_review_never_exceeds_remaining_total_completion_budget(self):
         value, pool, first, _ = self.depth_fixture()

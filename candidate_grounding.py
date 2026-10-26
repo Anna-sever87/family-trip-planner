@@ -941,6 +941,8 @@ def ground_region_candidates(
                     fact = {"base_key": base_key, "base_query": query, "lat": lat, "lon": lon, "official_name": record["name"],
                             "map_base_type": record.get("addresstype") or record.get("type"),
                             "map_address": _map_address(record.get("address"))}
+                    if identity := places.map_record_identity(record):
+                        fact.update(provider=identity[0], osm_type=identity[1], osm_id=identity[2])
                     bases[base_key] = fact
                     result.base_facts.append(fact)
         if reason:
@@ -1038,11 +1040,14 @@ def _regional_needs_reserve(request, result, minimum):
     if len(result.confirmed_hints) < minimum:
         return True
     from grounded_schedule import _pool
-    from regional_schedule_witness import build_witness, supports_witness
+    from regional_schedule_witness import build_witness, supports_witness, requested_minimum_bases
+    required = requested_minimum_bases(request)
+    if len(result.base_facts) < required:
+        return True
     if not supports_witness(request,result.base_facts):
         return False
     try:
-        return build_witness(request, *_pool(result), 5) is None
+        return build_witness(request, *_pool(result), 5, minimum_bases=required) is None
     except (ValueError, KeyError, TypeError):
         return True
 
@@ -1071,6 +1076,7 @@ def _balanced_regional_hints(request, bases, hints, limit):
         title=places._normalized_label(hint['title'])
         if hint.get('original_proposal_query') or (len(title)>4 and re.search(r'(?<!\w)'+re.escape(title)+r'(?!\w)',free_text)):
             include(hint)
+    local_by_base = {}
     for key,base in bases.items():
         local=[]
         for hint in hints:
@@ -1084,6 +1090,23 @@ def _balanced_regional_hints(request, bases, hints, limit):
                 local.append(hint)
         if local:
             include(local[0])
+        local_by_base[key] = local
+    from regional_schedule_witness import requested_minimum_bases, _DURATIONS
+    if requested_minimum_bases(request) > 1:
+        # A new regional centre needs useful local visits, not one short marker
+        # surrounded by eighteen city stops. Protect existing semantic choices
+        # first, then reserve up to a normal day's fixed blocks at each base.
+        from rules import program_depth_target
+        target = program_depth_target(request) or 180
+        for local in local_by_base.values():
+            local.sort(key=lambda hint: -_DURATIONS.get(hint.get('map_poi_type'), 0))
+            minutes = sum(_DURATIONS.get(hint.get('map_poi_type'), 0) for hint in local if hint in selected)
+            for hint in local:
+                if minutes >= target or len(selected) >= limit:
+                    break
+                if hint not in selected:
+                    include(hint)
+                    minutes += _DURATIONS.get(hint.get('map_poi_type'), 0)
     categories=list(dict.fromkeys(list(request.interest_categories)+['museums','parks','main_sights']+
                                   [groups.get(hint.get('map_poi_type'),'other') for hint in hints]))
     buckets={category:[hint for hint in hints if groups.get(hint.get('map_poi_type'),'other')==category
@@ -1101,26 +1124,53 @@ def _balanced_regional_hints(request, bases, hints, limit):
 
 def _regional_map_reserve(request, scope, bases, result, limit):
     """Map evidence supplements an unsuccessful name batch inside its budget."""
-    from regional_discovery import category_records, discover_town
+    from regional_discovery import category_records, discover_town, discover_secondary_base
+    from regional_schedule_witness import requested_minimum_bases
     from rules import _CHILD_WORD_RE
     dense = [base for base in bases.values() if base.get("map_base_type") in {"city", "town"}]
-    if not dense:
+    required = requested_minimum_bases(request)
+    while not dense or len(bases) < required:
         used = {key for hint in result.confirmed_hints for key in hint.get("allowed_base_keys", [])}
         key = next((key for key in BASE_KEYS if key not in bases), None)
         if key is None:
             key = next((key for key in reversed(BASE_KEYS) if key not in used), None)
-        record = discover_town(scope, result, near_bases=tuple(bases.values())) if key else None
+        record = (discover_secondary_base(scope, result, tuple(bases.values())) if dense else
+                  discover_town(scope, result, near_bases=tuple(bases.values()))) if key else None
         if record is not None and (not bases or min(places.distance_km(base["lat"], base["lon"], float(record["lat"]), float(record["lon"]))
                                                    for base in bases.values()) <= 100):
             fact = {"base_key": key, "base_query": record["base_query"],
                     "lat": float(record["lat"]), "lon": float(record["lon"]), "official_name": record["name"],
                     "map_base_type": record.get("addresstype") or record.get("type"),
                     "map_address": _map_address(record.get("address"))}
+            if identity := places.map_record_identity(record):
+                fact.update(provider=identity[0], osm_type=identity[1], osm_id=identity[2])
             bases[key] = fact
             result.base_facts[:] = [base for base in result.base_facts if base["base_key"] != key] + [fact]
-            dense = [fact]
+            dense.append(fact)
+        else:
+            break
+    # Existing POIs were checked before a secondary base was discovered.
+    # Re-evaluate only their base compatibility using the same saved provider
+    # identity/address/coordinates. No names, prices or travel facts are added.
+    from regional_discovery import inside_admin
+    for hint in result.confirmed_hints:
+        record = {**hint, 'name': hint.get('official_name', ''),
+                  'address': hint.get('map_address', {})}
+        if (places.map_record_identity(record) is None or not inside_admin(record, scope)
+                or not places._place_matches_query(hint.get('place_query', ''), record)):
+            continue
+        allowed = _allowed_base_keys(record, bases, scope)
+        if hint.get('base_key') in allowed:
+            hint['allowed_base_keys'] = allowed
     ordered = dense + [base for base in bases.values() if base not in dense]
-    for base in ordered[:2]:
+    if required > 1:
+        def local_count(base):
+            return sum(min(bases.values(), key=lambda other: places.distance_km(
+                other['lat'], other['lon'], hint['lat'], hint['lon']))['base_key'] == base['base_key']
+                for hint in result.confirmed_hints
+                if all(type(hint.get(field)) in (int, float) for field in ('lat', 'lon')))
+        ordered.sort(key=local_count)
+    for base in ordered[:max(2, required)]:
         for record in category_records(request, scope, base, result):
             if len(result.confirmed_hints) >= limit * 4:
                 break  # Bounded temporary alternatives, final public cap unchanged.

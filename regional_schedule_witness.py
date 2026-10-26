@@ -12,6 +12,7 @@ from copy import deepcopy
 from functools import lru_cache
 from itertools import combinations
 import math
+import re
 
 import places
 from rules import _CHILD_WORD_RE, program_depth_target
@@ -32,6 +33,47 @@ _INTEREST_TYPES = {
     "shopping_malls": {"mall", "shopping_centre"}, "zoos": {"zoo", "aquarium"},
     "amusement_parks": {"theme_park"},
 }
+
+
+def requested_minimum_bases(request):
+    """Recognise explicit overnight-base requests, never infer from 'region'.
+
+    This finite Russian-language rule is intentionally conservative: current
+    wishes/goal only, no memory, no single-city or fixed-stay interpretation.
+    Unrecognised prose remains the model's task; it is not silently classified.
+    """
+    if request.destination_kind != 'region' or request.days_count < 2:
+        return 1
+    text = (request.wishes + ';' + request.trip_goal).casefold().replace('ё', 'е')
+    if re.search(r'\b(?:без\s+смен\w*\s+(?:жилья|баз\w*|отел\w*|гостиниц\w*)|'
+                 r'(?:одн\w*|единственн\w*)\s+баз\w*|не\s+(?:менять|меняем)\s+(?:жилье|баз\w*|отел\w*))\b', text):
+        return 1
+    required = 1
+    for clause in re.split(r'[.!?;\n]', text):
+        if re.search(r'\b(?:не\s+(?:нужн\w*|хочу|планиру\w*)\s+(?:нескольк\w*|разн\w*|две|двух|2|три|трех|3|смен\w*)|'
+                     r'необязательн\w*\s+смен\w*|смен\w*\s+жилья\s+не\s+нужн\w*|баз\w*\s+не\s+нужн\w*|'
+                     r'возможн\w*|при\s+необходимости|если\s+понадобится|допускаю|не\s+против|можно)\b', clause):
+            continue
+        if re.search(r'\b(?:смен\w*\s+(?:жилья|баз\w*|отел\w*|гостиниц\w*)|'
+                     r'(?:нескольк\w*|разн\w*|две|двух|2|три|трех|3)\s+(?:разн\w*\s+)?баз\w*)\b', clause):
+            required = max(required, 3 if re.search(r'\b(?:три|трех|3)\s+(?:разн\w*\s+)?баз\w*', clause) else 2)
+    return min(required, request.days_count)
+
+
+def regional_coverage(request, itinerary, grounding=None):
+    """Observable base coverage; missing bases are a partial outcome, not fake geography."""
+    from grounded_schedule import _pool
+    bases = _pool(grounding)[0] if grounding is not None else []
+    by_query = {base['base_query']: base for base in bases}
+    selected = {day.base_area for day in itinerary.days if day.base_area
+                and (grounding is None or day.base_area in by_query)
+                and any(item.kind == 'attraction' for item in day.items)}
+    required = requested_minimum_bases(request)
+    missing = len(selected) < required
+    return {'quality_status': 'partial' if missing else 'complete',
+            'quality_reasons': ['regional_scope_narrowed'] if missing else [],
+            'requested_bases': required, 'selected_bases': len(selected),
+            **({'confirmed_bases': len(bases)} if grounding is not None else {})}
 
 
 def supports_witness(request, bases):

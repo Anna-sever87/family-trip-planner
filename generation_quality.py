@@ -21,6 +21,7 @@ REASONS = {
     "day_window_unbalanced": "На части дней посещения сосредоточены в одной части заданного окна; оставшееся время не заполнено программой.",
     "selection_depth_shortfall": "После отбора осталось недостаточно подходящих посещений для всех дней; исходный поиск нашёл больше мест.",
     "selection_repair_failed": "Дополнительная проверка отбора не завершилась; сохранён ранее проверенный результат без автоматического повтора.",
+    "regional_scope_narrowed": "Запрошена поездка с несколькими базами проживания, но программа охватывает меньше баз. Полный маршрут по региону не составлен.",
 }
 _COUNTS = {
     "requested_days", "program_days", "free_days", "eligible_candidates", "input_candidates",
@@ -31,6 +32,7 @@ _COUNTS = {
     "selection_calls", "preference_planning_minutes", "pool_planning_minutes", "discovered_candidates", "preference_candidates",
     "source_alternatives_confirmed",
     "desired_program_minutes", "light_program_days", "unbalanced_program_days",
+    "requested_bases", "selected_bases", "confirmed_bases",
 }
 _BOOLS = {"search_complete", "name_limit_reached", "map_limit_reached", "usable_limit_reached",
           "replenishment_attempted", "selection_repair_attempted", "selection_depth_shortfall"}
@@ -43,6 +45,7 @@ _REJECTIONS = {
     "amusement_interest_not_requested", "specialized_animal_reserve_limit",
     "duplicate_canonical_query",
     "city_only_membership_unconfirmed",
+    "service_component_not_visit",
 }
 
 
@@ -78,6 +81,12 @@ def safe_coverage(raw):
                          ("memory_ranking_status", {"applied", "unavailable"})):
         if isinstance(raw.get(key), str) and raw[key] in allowed:
             clean[key] = raw[key]
+    failure = raw.get("selection_review_failure_reason")
+    if isinstance(failure, str) and failure in {
+        "ai_unavailable", "response_size", "invalid_json", "response_fields", "selection_status",
+        "decision_fields", "decision_code", "status_decision_mismatch", "shopping_request_mismatch",
+    }:
+        clean["selection_review_failure_reason"] = failure
     review = raw.get("selection_review")
     exclusion_reasons = {"current_request_restriction", "duplicate_or_component",
                          "not_standalone_visit", "unverifiable_required_condition"}
@@ -118,9 +127,23 @@ def memory_note(stored):
         "Обязательные ограничения укажите в ней.")
 
 
-def public_quality(stored, itinerary):
+def public_quality(stored, itinerary, request=None):
     """Observable calendar always overrides stale saved totals after editing."""
     quality = safe_coverage(stored)
+    if request is not None and request.destination_kind == "region":
+        from regional_schedule_witness import regional_coverage
+        observed = safe_coverage(regional_coverage(request, itinerary))
+        if quality or observed.get("quality_status") == "partial":
+            quality.update({key: observed[key] for key in ("requested_bases", "selected_bases")
+                            if key in observed})
+            reasons = (set(quality.get("quality_reasons", [])) - {"regional_scope_narrowed"})
+            reasons.update(observed.get("quality_reasons", []))
+            quality["quality_reasons"] = sorted(reasons)
+            if observed.get("quality_status") == "partial":
+                quality["quality_status"] = "partial"
+            elif (not reasons and quality.get("quality_status") == "partial"
+                  and "regional_scope_narrowed" in safe_coverage(stored).get("quality_reasons", [])):
+                quality["quality_status"] = "complete"
     days = itinerary.days
     if not quality and not getattr(itinerary, "city_schedule", False):
         return {}

@@ -932,7 +932,7 @@ def get_trip_detail(tg_id: int, trip_id: int) -> Dict[str, Any]:
         "weather_text": str(trip.get("request", {}).get("weather_text", "")),
         "itinerary": public_itinerary,
         "generation_quality": generation_quality.public_quality(
-            trip.get("request", {}).get(generation_quality.KEY), itinerary),
+            trip.get("request", {}).get(generation_quality.KEY), itinerary, request),
         "budget": {
             "currency": request.currency,
             "limit": request.budget,

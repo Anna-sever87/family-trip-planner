@@ -43,7 +43,7 @@ GROUNDED_RESPONSE_FORMAT_RULE = """ФОРМАТ ОТВЕТА ДЛЯ ПОДТВЕ
 GROUNDED_SYSTEM_PROMPT = """Ты составляешь реалистичное расписание региональной поездки из подготовленных географических фактов. Верни только JSON по переданной схеме.
 
 1. Каждый attraction выбирается по короткому candidate_id из candidates. Название, поисковый запрос и местность восстановит программа; не перепечатывай их в JSON посещения. Используй каждый candidate_id один раз за поездку. Базу дня укажи коротким base_id из bases; он обязан входить в allowed_base_ids каждого посещаемого кандидата. Сначала распредели уникальные места между датами вокруг допустимых баз, затем назначь время. Сохраняй базу несколько дней, когда это разумно. Совместимость адресов не доказывает существование дороги.
-2. Все посещения, обед и отдых помещаются в окно дня без пересечений. Дороге оставляй свободные интервалы от базы к первому месту, между местами и обратно. При смене базы до первого посещения нужно время от предыдущей базы к новой; в transfer_note укажи обе базы, ориентировочную длительность и ограничения. Геометрическая нижняя оценка не подтверждает фактическую дорогу.
+2. Все посещения, обед и отдых помещаются в окно дня без пересечений. Дороге оставляй свободные интервалы от базы к первому месту, между местами и обратно. При смене базы до первого посещения нужно время от предыдущей базы к новой; в transfer_note укажи обе базы, ориентировочную длительность и ограничения. Геометрическая нижняя оценка не подтверждает фактическую дорогу. Если minimum_requested_bases больше 1, пользователь хочет несколько баз: используй разные подтверждённые базы при наличии совместимого расписания, не своди всю региональную поездку к одному городу. Если нужное число баз недоступно, явно укажи в summary, какая часть региональной поездки не составлена.
 3. Распредели уникальные посещения на все даты с содержательностью program_depth_target_minutes, если она задана. Одно короткое посещение — не готовая программа дня. Нельзя израсходовать места в начале поездки и оставить последние дни без attraction. В каждом дне ровно один meal и один rest. Их place_query — пустая строка; title отдыха — «Отдых». Число посещений и содержательность определяются constraints и составом группы. Реалистичная длительность описывает содержание посещения; пустые часы не нужно заполнять искусственно.
 4. Соблюдай бюджет программы, минимальную стоимость обеда на всю группу и семейные ограничения из request_rules. Дорога до направления и жильё уже зарезервированы. Оценочную стоимость внутренних переездов включай в связанный attraction с пояснением; неизвестную стоимость обозначай как ограничение, оставляя запас бюджета.
 5. Карта подтверждает только идентичность и координаты. Она не подтверждает часы работы, цену, длительность, доступность или сезонный транспорт. Активности с сезонными переправами и водными маршрутами требуют подтверждения доступности на даты поездки; одних координат недостаточно. Rainy_alternative оставь пустой: запасные места данным этапом не подготовлены. Summary описывает фактическую географию и ограничения, а не обещает, что все проверки пройдены.
@@ -183,12 +183,17 @@ def build_grounded_messages(
         "bases": bases,
         "candidates": candidates,
     }
+    from regional_schedule_witness import requested_minimum_bases
+    request_rules["minimum_requested_bases"] = requested_minimum_bases(request)
     from regional_schedule_witness import build_witness
     witness = build_witness(request, bases, candidates, limit)
-    if len(bases) > 1 and request.days_count > 1:
+    requested_bases = request_rules["minimum_requested_bases"]
+    suggested_bases = (min(requested_bases, len(bases)) if requested_bases > 1 else
+                       2 if not any((request.wishes.strip(), request.trip_goal.strip(), request.stay_area.strip())) else 1)
+    if len(bases) > 1 and request.days_count > 1 and suggested_bases > 1:
         # A regional example with two real local bases is useful when feasible;
         # a second overnight base is never invented merely to make it regional.
-        regional_example = build_witness(request, bases, candidates, limit, minimum_bases=2)
+        regional_example = build_witness(request, bases, candidates, limit, minimum_bases=suggested_bases)
         if regional_example is not None:
             witness = regional_example
     if witness is not None:
