@@ -47,11 +47,11 @@ class AcceptanceDestinationCoverTests(unittest.TestCase):
 
     def test_novosibirsk_subject_is_building_not_intersection(self):
         prompt = self.build("Новосибирск", "Россия")
-        for value in ("НОВАТ", "пологим округлым куполом", "весь силуэт купола", "оба края здания",
+        for value in ("НОВАТ", "пологим округлым куполом", "оба края здания",
                       "с площади", "полный контур", "основание без обрезки"):
             self.assertIn(value, prompt.provider_prompt)
         self.assertLess(prompt.provider_prompt.index("Общий план"), prompt.provider_prompt.index("Место (данные"))
-        for value in ("перекрёст", "аэрофото", "колонн", "башн"):
+        for value in ("перекрёст", "аэрофото", "башн", "силуэт"):
             self.assertNotIn(value, prompt.provider_prompt)
 
     def test_country_mismatch_and_unlisted_region_alias_never_guess_a_subject(self):
@@ -74,11 +74,13 @@ class AcceptanceDestinationCoverTests(unittest.TestCase):
                     with self.subTest(city=city, country=country):
                         prompt = self.build(city, country)
                         self.assertTrue(prompt.generation_allowed)
-                        self.assertEqual(prompt.version, "destination-cover-v17")
+                        self.assertEqual(prompt.version, "destination-cover-v18")
                         self.assertLessEqual(len(prompt.provider_prompt), 500)
                         self.assertIn(json.dumps([city, country], ensure_ascii=False, separators=(",", ":")),
                                       prompt.provider_prompt)
-                        for required in ("Цветной дневной свет",
+                        expected_light = ("Полноцветный дневной свет спереди" if key == "novosibirsk-russia"
+                                          else "Цветной дневной свет")
+                        for required in (expected_light,
                                          "объект целиком", "полный контур", "верх и основание без обрезки",
                                          "горизонтальный взгляд", "не прогноз сезона",
                                          "Без людей, текста, логотипов, цен и вымышленных мест"):

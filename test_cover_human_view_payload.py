@@ -71,7 +71,7 @@ class CoverHumanViewPayloadTests(unittest.TestCase):
                 self.assertIn(required, text)
         self.assertIn("не прогноз сезона", text)
         self.assertIn("Без людей, текста, логотипов, цен и вымышленных мест", text)
-        self.assertEqual(prompt.version, "destination-cover-v17")
+        self.assertEqual(prompt.version, "destination-cover-v18")
         return text
 
     def test_every_exact_scene_alias_sends_camera_first_without_identity_truncation(self):
@@ -124,6 +124,47 @@ class CoverHumanViewPayloadTests(unittest.TestCase):
         self.assertNotIn("verified_subject", json.loads(prompt.user_prompt))
         self.assertEqual(prompt.subject_label, "Памятник Ерофею Хабарову на привокзальной площади")
         self.assertIn("railway-station square", json.loads(prompt.user_prompt)["trusted_scene"])
+
+    def test_novat_actual_request_prioritizes_full_colour_front_lighting_at_every_budget_tier(self):
+        styles = set()
+        cities, countries, _ = covers._TRUSTED_SCENES["novosibirsk-russia"]
+        for city in sorted(cities):
+            for country in sorted(countries):
+                with self.subTest(city=city, country=country):
+                    prompt = self.build(city, country)
+                    text = self.assert_actual_prompt(prompt)
+                    self.assertTrue(text.startswith(covers._GROUND_CAMERA + covers._NOVAT_FRONT_LIGHT))
+                    for detail in ("Полноцветный дневной свет спереди", "видны окна, колонны и фактура"):
+                        self.assertLess(text.index(detail), text.index("ИИ-обложка"))
+                        self.assertLess(text.index(detail), text.index("Общий план"))
+                        self.assertLess(text.index(detail), text.index("Место (данные"))
+                    self.assertIn(json.dumps([city, country], ensure_ascii=False, separators=(",", ":")), text)
+                    self.assertIn("Театр оперы и балета НОВАТ", text)
+                    self.assertIn("пологим округлым куполом", text)
+                    self.assertEqual(prompt.subject_label, "Новосибирский театр оперы и балета (НОВАТ)")
+                    for unwanted in ("силуэт", "silhouette", "чёрн", "черн", "аэрофото"):
+                        self.assertNotIn(unwanted, (text + prompt.user_prompt).casefold())
+                    trusted = json.loads(prompt.user_prompt)["trusted_scene"]
+                    self.assertIn("bright front-lit daylight", trusted)
+                    self.assertIn("windows, columns and material texture", trusted)
+                    styles.add("short" if covers._SHORT_COMPACT_STYLE in text else "minimal")
+        self.assertEqual(styles, {"short", "minimal"})
+
+    def test_v18_cache_separates_prior_version_without_weakening_exact_destination_binding(self):
+        prompt = self.build("Новосибирск", "Россия")
+        with patch.object(covers, "COVER_PROMPT_VERSION", "destination-cover-v17"):
+            previous_namespace = self.build("Новосибирск", "Россия")
+        self.assertNotEqual(prompt.cache_key, previous_namespace.cache_key)
+        self.assertEqual(prompt.version, "destination-cover-v18")
+        for city, country in (("Новосибирск", "Китай"), ("Novosibirsk", "United States"),
+                              ("Новосибирск и Томск", "Россия")):
+            wrong = self.build(city, country)
+            self.assertFalse(wrong.generation_allowed)
+            self.assertEqual(wrong.provider_prompt, "")
+        saved = covers.CoverSubject("Private Unrelated Museum", "museum", "osm-way-123", "Новосибирск", "Россия")
+        authoritative = self.build("Новосибирск", "Россия", subject=saved)
+        self.assertEqual(authoritative.cache_key, prompt.cache_key)
+        self.assertNotIn(saved.title, authoritative.provider_prompt)
 
     def test_unknown_or_wrong_country_and_combined_place_do_not_submit(self):
         for city, country in (("Хабаровск", "Китай"), ("Khabarovsk", "United States"),

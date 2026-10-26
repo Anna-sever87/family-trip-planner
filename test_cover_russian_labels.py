@@ -35,7 +35,7 @@ class CoverRussianLabelsTests(unittest.TestCase):
                     self.assertTrue(prompt.generation_allowed)
                     self.assertLessEqual(len(prompt.provider_prompt), 500)
                     self.assertEqual(prompt, repeated)
-                    self.assertEqual(prompt.version, "destination-cover-v17")
+                    self.assertEqual(prompt.version, "destination-cover-v18")
                     self.assertIn(json.dumps([city, country], ensure_ascii=False, separators=(",", ":")),
                                   prompt.provider_prompt)
                     for value in ("белое здание модернизма", "горизонтальные балконы", "Через лужайку",

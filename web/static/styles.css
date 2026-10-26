@@ -123,7 +123,7 @@ button, input, select, textarea, summary, a { -webkit-tap-highlight-color: trans
 .trip-card { position: relative; overflow: hidden; min-width: 0; background: var(--panel); border: 1px solid var(--line); border-radius: 14px; box-shadow: var(--shadow); display: flex; flex-direction: column; transition: box-shadow .2s ease, border-color .2s ease; }
 .trip-card:hover { border-color: #b9cde9; box-shadow: 0 12px 28px rgba(16, 43, 70, .09); }
 .trip-card-cover { position: relative; overflow: hidden; background: #e4edf9; }
-.trip-cover-frame { position: relative; overflow: hidden; aspect-ratio: 3 / 2; background: #102b46; }
+.trip-cover-frame { position: relative; overflow: hidden; width: 100%; aspect-ratio: 3 / 2; background: #102b46; }
 /* Preserve the entire generated frame, including a landmark's roof and base.
    Letterboxing is intentional; neither hover nor a narrow screen crops it. */
 .trip-card-cover img, .trip-detail-cover img { position: absolute; inset: 0; display: block; width: 100%; height: 100%; object-fit: contain; object-position: center; }

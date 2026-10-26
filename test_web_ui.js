@@ -1057,6 +1057,10 @@ test("immutable cover subject is a separate plain-text caption and clears on ima
 
 test("cover framing contains the whole image and never zooms on hover or overlays its caption", () => {
   const css = fs.readFileSync(path.join(__dirname, "web/static/styles.css"), "utf8");
+  const frameRule = css.match(/\.trip-cover-frame\s*\{([^}]+)\}/)[1];
+  // Explicit width prevents the detail height cap from narrowing the frame
+  // through its preferred aspect ratio and leaving an empty right-hand area.
+  assert.match(frameRule, /width:\s*100%/);
   const imageRule = css.match(/\.trip-card-cover img, \.trip-detail-cover img\s*\{([^}]+)\}/)[1];
   assert.match(imageRule, /object-fit:\s*contain/);
   assert.match(imageRule, /object-position:\s*center/);

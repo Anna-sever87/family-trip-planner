@@ -14,7 +14,7 @@ import re
 import unicodedata
 
 
-COVER_PROMPT_VERSION = "destination-cover-v17"
+COVER_PROMPT_VERSION = "destination-cover-v18"
 COVER_DISCLOSURE = "ИИ-иллюстрация направления, не фотография места"
 
 COVER_SYSTEM_PROMPT = """Create a premium editorial travel illustration, not documentary evidence.
@@ -95,9 +95,10 @@ _TRUSTED_SCENES = {
         "The Novosibirsk Opera and Ballet Theatre (NOVAT), Novosibirsk, Russia: "
         "the recognizable broad theatre building with its enormous shallow "
         "rounded dome. A distant view from the square at pedestrian eye level: "
-        "the complete dome silhouette, both ends of the building and the base "
-        "are inside the frame with generous margins. Natural full colour, a softly "
-        "lit readable facade and clear detail; editorial lighting is not a weather forecast.",
+        "the complete rounded dome, both ends of the building and the base "
+        "are inside the frame with generous margins. Natural full colour and "
+        "bright front-lit daylight reveal the windows, columns and material texture; "
+        "editorial lighting is not a weather forecast.",
     ),
     # Official site: https://dinhdoclap.gov.vn/en/the-independence-palace-national-historic-site/
     # Modern main building / rooftop terrace, not the separate tiled pavilion:
@@ -189,7 +190,7 @@ _COMPACT_SCENES = {
     "khabarovsk-russia": "Памятник Ерофею Хабарову на привокзальной площади: вся статуя и постамент целиком, вид с площади.",
     "singapore-singapore": "Мерлайон у Marina Bay: белый фонтан с головой льва и телом рыбы, статуя с основанием целиком.",
     "karelia-russia": "Мраморный каньон Рускеала: светлые мраморные скалы отражаются в воде, лесистые берега. Без зданий и лодок.",
-    "novosibirsk-russia": "Театр оперы и балета НОВАТ: широкое здание с огромным пологим округлым куполом. Вид с площади, весь силуэт купола и оба края здания.",
+    "novosibirsk-russia": "Театр оперы и балета НОВАТ: широкое здание с пологим округлым куполом; вид с площади, оба края здания.",
     "ho-chi-minh-vietnam": "Дворец Dinh Doc Lap (1966): белое здание модернизма, плоская крыша-терраса, горизонтальные балконы. Через лужайку, оба края фасада.",
     "moscow-russia": "Кремлёвская стена у Москвы-реки.",
     "sochi-russia": "Черноморская набережная Сочи, город и дальние горы.",
@@ -212,6 +213,7 @@ _COMPACT_COMPOSITION = (
 )
 _DISTANT_BUILDING_SCENES = frozenset({"novosibirsk-russia", "ho-chi-minh-vietnam"})
 _DISTANT_BUILDING_LIGHT = "Цветной дневной свет; не прогноз сезона. "
+_NOVAT_FRONT_LIGHT = "Полноцветный дневной свет спереди; видны окна, колонны и фактура; не прогноз сезона. "
 _NATURAL_COMPOSITION = "Цельный пейзаж с берега, запас по краям. "
 _NATURAL_SCENES = frozenset({"sochi-russia", "baikal-russia", "nha-trang-vietnam", "karelia-russia"})
 # Captions describe only the chosen illustration subject, never a claim that
@@ -439,13 +441,20 @@ def build_cover_prompt(
     scene_prompt = composition + location + compact_scene + " "
     lighting = (_DISTANT_BUILDING_LIGHT if template_key in _DISTANT_BUILDING_SCENES
                 else "Нейтральный дневной свет, не прогноз сезона. ")
+    # Real v17 output was a dark outline despite its final lighting clause.
+    # Give the verified NOVAT's positive front lighting early provider weight;
+    # avoid naming rejected visual styles in either positive or negative form.
+    early_lighting = _NOVAT_FRONT_LIGHT if template_key == "novosibirsk-russia" else ""
+    if early_lighting:
+        lighting = ""
     subject_prompt = scene_prompt + lighting + "Без людей, текста, логотипов, цен и вымышленных мест."
-    provider_prompt = camera + _COMPACT_STYLE + subject_prompt if template_key != "generic" else ""
+    prefix = camera + early_lighting
+    provider_prompt = prefix + _COMPACT_STYLE + subject_prompt if template_key != "generic" else ""
     if len(provider_prompt) > 500:
         # Reduce style verbosity only, never the place, country or safety rules.
-        provider_prompt = camera + _SHORT_COMPACT_STYLE + subject_prompt
+        provider_prompt = prefix + _SHORT_COMPACT_STYLE + subject_prompt
     if len(provider_prompt) > 500:
-        provider_prompt = camera + _MINIMAL_COMPACT_STYLE + subject_prompt
+        provider_prompt = prefix + _MINIMAL_COMPACT_STYLE + subject_prompt
     if len(provider_prompt) > 500:
         # Never truncate an exact name or drop safety to spend on an ambiguous
         # substitute. The same free neutral fallback covers oversized labels.
