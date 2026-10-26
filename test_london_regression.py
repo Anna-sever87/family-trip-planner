@@ -104,7 +104,7 @@ class FourDayBudgetRegressionTests(unittest.TestCase):
         self.assertTrue({"travel", "lodging", "admission", "local_transport", "other_meals"}.issubset(codes))
         self.assertEqual((budget["planned_total"], budget["remaining"]), (124, 19876))
 
-    def test_source_and_legacy_routes_do_not_inherit_map_only_missing_price_claims(self):
+    def test_legacy_zero_admission_is_unknown_but_source_confirmed_zero_is_preserved(self):
         for city_schedule, source_schedule in ((True, True), (False, False), (False, True)):
             with self.subTest(city=city_schedule, source=source_schedule):
                 itinerary = self.itinerary.model_copy(deep=True)
@@ -112,7 +112,12 @@ class FourDayBudgetRegressionTests(unittest.TestCase):
                 itinerary.source_schedule = source_schedule
                 before = itinerary.model_dump()
                 coverage = city_estimates.budget_coverage(self.request, itinerary)
-                self.assertEqual(coverage, {"status": "estimate", "missing": [], "notes": []})
+                if source_schedule:
+                    self.assertEqual(coverage, {"status": "estimate", "missing": [], "notes": []})
+                else:
+                    self.assertEqual(coverage["status"], "incomplete")
+                    self.assertEqual([entry["code"] for entry in coverage["missing"]], ["admission"])
+                    self.assertIn("9", coverage["missing"][0]["message"])
                 self.assertEqual(itinerary.model_dump(), before)
 
     def test_malformed_legacy_interests_never_break_pdf_or_expose_raw_values(self):
