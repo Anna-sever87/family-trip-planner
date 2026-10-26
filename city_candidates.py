@@ -70,6 +70,7 @@ DETAIL_REJECTION_REASONS = frozenset({
     "amusement_interest_not_requested", "specialized_animal_reserve_limit",
     "city_only_membership_unconfirmed",
     "service_component_not_visit",
+    "generic_name_or_non_visit", "explicit_structure_warning",
 })
 _LOCAL_NAME_LANGUAGES = {"vn": "vi,en", "tr": "tr,en"}
 # Language choice must not silently reduce the reserve for a longer trip.
@@ -168,6 +169,18 @@ def _service_component(record) -> bool:
         normalized = "".join(char for char in unicodedata.normalize("NFKD", name)
                              if not unicodedata.combining(char)).casefold()
         normalized = " ".join(normalized.split()).strip().replace("đ", "d")
+        # Explicit operator/dispatch labels are services, not independent
+        # sightseeing visits. A transport museum or named sightseeing tour is
+        # not rejected merely because its name contains the same words.
+        visitor_name = re.search(r"\b(?:museum|gallery|tours?|sightseeing|heritage|музеи|музея|галерея|экскурси\w*)\b", normalized)
+        if (not visitor_name and re.search(
+                r"\b(?:bus|taxi)\s+(?:compan(?:y|ies)|operators?|dispatch(?:ing)?(?:\s+(?:office|cent(?:er|re)))?)\b",
+                normalized)):
+            return True
+        if (not visitor_name and record.get("category") == "tourism"
+                and record.get("type") in {"attraction", "viewpoint"}
+                and re.match(r"^bai\s+cho(?:\s|$)", normalized)):
+            return True
         if re.search(r"^(?:parking\s+(?:garage|lot|for|at)|car\s+park|"
                      r"парковк[аи]|автостоянк[аи]|паркинг|nha\s+dau\s+xe|"
                      r"bai\s+(?:do|dau|giu)\s+xe)\b", normalized):
@@ -179,6 +192,29 @@ def _service_component(record) -> bool:
         if re.search(r"(?:\bentrance|\bвход|入口|入り口|出入口)$", normalized):
             return True
     return False
+
+
+def _explicit_visit_label_rejection(record) -> str:
+    """Narrow source-name guards for broad sightseeing tags, not access facts.
+
+    Do not generalize a damaged modern attraction to historic ruins, infer a
+    closure from an address/description, or manufacture a better place name.
+    """
+    if (not isinstance(record, dict) or record.get("category") != "tourism"
+            or record.get("type") not in {"attraction", "viewpoint"}):
+        return ""
+    official = str(record.get("name") or "").split(",", 1)[0].strip()
+    names = [official]
+    details = record.get("namedetails")
+    if isinstance(details, dict):
+        names.extend(value for key, value in details.items()
+                     if isinstance(key, str) and (key == "name" or key.startswith("name:"))
+                     and isinstance(value, str) and len(value) <= 500)
+    if any(re.search(r"\(\s*partially\s+demolished\s*\)\s*$", name, re.IGNORECASE) for name in names):
+        return "explicit_structure_warning"
+    if unicodedata.normalize("NFKC", official).casefold() == "cầu":
+        return "generic_name_or_non_visit"
+    return ""
 
 
 def _proposal_quality(item) -> int:
@@ -336,6 +372,8 @@ def _canonical_record(title: str, record: Any, center: dict) -> dict | None:
             return None
         if _service_component(record):
             return None
+        if _explicit_visit_label_rejection(record):
+            return None
         # The global matcher permits provider coordinate strings; canonical
         # records become strict numeric values only after identity validation.
         if (not places._place_matches_query(f"{title}, {center['country_code']}", record)
@@ -458,6 +496,8 @@ def _rejection_detail(title: str, raw: Any, center: dict) -> str:
         return "missing_provider_identity"
     if _service_component(record):
         return "service_component_not_visit"
+    if explicit_reason := _explicit_visit_label_rejection(record):
+        return explicit_reason
     if not _eligible_poi_type(record) or record.get("type") == "peak":
         return "unsupported_poi_type"
     official = str(record.get("name") or "").split(",", 1)[0].strip()

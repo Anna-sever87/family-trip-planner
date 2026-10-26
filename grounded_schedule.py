@@ -33,6 +33,35 @@ MAP_ADDRESS_FIELDS = (
     "municipality", "county", "state", "region", "country", "country_code",
 )
 
+
+def display_regional_transfer_note(itinerary, day_index: int, destination_kind: str) -> str:
+    """Describe observed base changes without rewriting a stored itinerary.
+
+    Map-based AI schedules do not prove road access, travel duration or lodging.
+    Source-backed and city schedules retain their original transport notes.
+    """
+    day = itinerary.days[day_index]
+    original = str(getattr(day, 'transfer_note', '') or '')
+    if (destination_kind != 'region' or getattr(itinerary, 'source_schedule', False) is True
+            or getattr(itinerary, 'city_schedule', False) is True):
+        return original
+    base = str(getattr(day, 'base_area', '') or '').strip()
+    previous = (str(getattr(itinerary.days[day_index - 1], 'base_area', '') or '').strip()
+                if day_index else '')
+    if not base:
+        return 'База дня не указана. Место проживания, фактический путь, время и вид транспорта нужно уточнить.'
+    if previous and ' '.join(previous.split()).casefold() != ' '.join(base.split()).casefold():
+        return (f'Смена базы проживания: из {previous} в {base}. До первого посещения уточните фактический путь, '
+                'время и вид транспорта. Дорожная и сезонная доступность, время в пути и условия смены жилья не подтверждены.')
+    if day_index == 0:
+        return (f'Начало программы на базе: {base}. Прибытие к первой базе и заселение планируются отдельно. '
+                'Фактический путь, время и вид транспорта для местных перемещений нужно уточнить.')
+    if not previous:
+        return (f'База дня: {base}. Предыдущая база не указана; возможность переезда и смены жилья нужно уточнить. '
+                'Фактический путь, время и вид транспорта не подтверждены.')
+    return (f'База сохраняется: {base}. Смена базы проживания не запланирована. '
+            'Путь к местам и обратно, сезонную доступность, время и вид транспорта для местных перемещений нужно уточнить.')
+
 GROUNDED_RESPONSE_FORMAT_RULE = """ФОРМАТ ОТВЕТА ДЛЯ ПОДТВЕРЖДЁННОГО РЕГИОНАЛЬНОГО РАСПИСАНИЯ:
 Верни только JSON по текущей response schema. Для полной поездки верхний объект содержит title, summary, tips и отдельный обязательный ключ day_1, day_2, ... для каждой даты request_rules.dates. В режиме исправления верни только запрошенные ключи day_N из response_keys, без title/summary/tips всей поездки.
 Внутри каждого day_N сохрани обязательные day, date, theme, base_id, transfer_note и rainy_alternative по схеме. base_id — короткий код b01/b02/b03 из bases. Вместо items используй три отдельных обязательных поля: attractions — массив минимум из одного посещения с kind=attraction и candidate_id (короткий код p01/p02/... из candidates); meal — один объект с kind=meal; rest — один объект с kind=rest. В attractions НЕ передавай title, area и place_query: программа сама восстановит их из выбранного candidate_id. В day_N НЕ передавай base_area: оно восстанавливается из base_id. Нельзя придумывать новые коды. У meal и rest place_query пуст; title отдыха — «Отдых». Стоимость meal не ниже заданного в схеме минимума для всей группы. Номера и даты точно совпадают с ключами дней и схемой.

@@ -46,6 +46,7 @@ _REJECTIONS = {
     "duplicate_canonical_query",
     "city_only_membership_unconfirmed",
     "service_component_not_visit",
+    "explicit_structure_warning",
 }
 
 

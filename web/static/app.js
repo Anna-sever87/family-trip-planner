@@ -1292,7 +1292,7 @@ function renderSelectedDay() {
     geography.append(node("p", "", `База дня: ${day.base_area}`));
   }
   if (day.transfer_note) {
-    geography.append(node("p", "", `Переезд: ${day.transfer_note}`));
+    geography.append(node("p", "", `Перемещения: ${day.transfer_note}`));
   }
   geography.hidden = !day.base_area && !day.transfer_note;
   const timeline = $("timeline");

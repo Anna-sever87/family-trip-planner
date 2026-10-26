@@ -892,7 +892,9 @@ def get_trip_detail(tg_id: int, trip_id: int) -> Dict[str, Any]:
     place_labels = build_place_labels(trip)
     public_itinerary["program_report_text"] = program_report_text(itinerary)
     public_itinerary["unpriced_visit_note"] = city_unpriced_visit_note(itinerary)
-    for day, public_day in zip(itinerary.days, public_itinerary["days"]):
+    from grounded_schedule import display_regional_transfer_note
+    for day_index, (day, public_day) in enumerate(zip(itinerary.days, public_itinerary["days"])):
+        public_day["transfer_note"] = display_regional_transfer_note(itinerary, day_index, request.destination_kind)
         for item, public_item in zip(day.items, public_day["items"]):
             public_item["display_title"] = display_place_title(item, place_labels)
             attribution = item_map_attribution(item)

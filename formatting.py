@@ -6,6 +6,7 @@ from verified_map_places import is_public_map_point
 from program_coverage import FREE_DAY_NOTE, program_report_text
 from city_estimates import UNPRICED_VISIT_LABEL, city_unpriced_visit_note, is_unpriced_city_visit
 from place_labels import build_place_labels, display_place_title
+from grounded_schedule import display_regional_transfer_note
 
 KIND_ICONS = {"attraction": "🏛", "meal": "🍽", "rest": "😴"}
 
@@ -32,7 +33,7 @@ def format_itinerary(
         lines += ["", f"🌦 {weather_text}"]
 
     total = 0.0
-    for day in itinerary.days:
+    for day_index, day in enumerate(itinerary.days):
         lines += ["", f"📅 День {day.day} ({day.date}): {day.theme}"]
         if getattr(day, "day_mode", "program") == "free":
             lines += ["Свободный режим", FREE_DAY_NOTE]
@@ -44,21 +45,15 @@ def format_itinerary(
             )
             or ""
         ).strip()
-        transfer_note = str(
-            getattr(
-                day,
-                "transfer_note",
-                "",
-            )
-            or ""
-        ).strip()
+        transfer_note = display_regional_transfer_note(
+            itinerary, day_index, (saved_request or {}).get('destination_kind', ''))
         if base_area:
             lines.append(
                 f"📍 База дня: {base_area}"
             )
         if transfer_note:
             lines.append(
-                f"🚗 Переезд: {transfer_note}"
+                f"🚗 Перемещения: {transfer_note}"
             )
         for item in day.items:
             total += item.cost

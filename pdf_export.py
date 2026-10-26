@@ -19,6 +19,7 @@ from verified_map_places import is_public_map_point, item_map_attribution
 from program_coverage import FREE_DAY_NOTE, program_report_text
 from city_estimates import UNPRICED_VISIT_LABEL, budget_coverage, city_unpriced_visit_note, is_unpriced_city_visit
 from place_labels import build_place_labels, display_place_title
+from grounded_schedule import display_regional_transfer_note
 
 _WINDIR = os.environ.get("WINDIR", "C:\\Windows")
 # Пары (обычный, жирный). Первый найденный вариант используется. Свой шрифт можно положить в папку fonts.
@@ -312,7 +313,7 @@ def build_trip_pdf(trip: Dict[str, Any], checklist: List[Dict[str, Any]]) -> byt
     story.extend(_p(note, small) for note in budget_disclosure["notes"])
 
     program_through_day = 0.0
-    for day in itinerary.days:
+    for day_index, day in enumerate(itinerary.days):
         story.append(PageBreak())
         story.append(_p(f"День {day.day} ({day.date}): {_clean(day.theme)}", heading))
         day_total = round(sum(_amount(item.cost) for item in day.items), 2)
@@ -329,9 +330,10 @@ def build_trip_pdf(trip: Dict[str, Any], checklist: List[Dict[str, Any]]) -> byt
             story += [_p("Свободный режим", bold_style), _p(FREE_DAY_NOTE, base), Spacer(1, 6)]
         if day.base_area:
             story.append(_p(f"База дня: {day.base_area}", base))
-        if day.transfer_note:
-            story.append(_p(f"Переезд (ориентировочно): {day.transfer_note}", small))
-        if day.base_area or day.transfer_note:
+        transfer_note = display_regional_transfer_note(itinerary, day_index, request.get('destination_kind', ''))
+        if transfer_note:
+            story.append(_p(f"Перемещения: {transfer_note}", small))
+        if day.base_area or transfer_note:
             story.append(Spacer(1, 6))
         rows = []
         for item in day.items:

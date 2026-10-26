@@ -427,6 +427,29 @@ function elementText(element) {
   return [element.textContent, ...element.children.map(elementText)].join(" ");
 }
 
+test("full regional rendering uses neutral movement label and preserves server base-change disclosure", () => {
+  const ui = browser();
+  ui.state.trip = detailTrip(32);
+  ui.state.trip.request.destination_kind = "region";
+  ui.state.trip.itinerary.days = [
+    { day: 3, date: "2027-06-03", theme: "Выезды с прежней базы", items: [], base_area: "Кондопога",
+      transfer_note: "База сохраняется: Кондопога. Смена базы проживания не запланирована. Путь к местам и обратно нужно уточнить." },
+    { day: 4, date: "2027-06-04", theme: "Смена базы", items: [], base_area: "Петрозаводск",
+      transfer_note: "Смена базы проживания: из Кондопога в Петрозаводск. Время и вид транспорта не подтверждены." },
+  ];
+  const before = JSON.stringify(ui.state.trip);
+  for (const day of ui.state.trip.itinerary.days) {
+    ui.state.selectedDay = day.day;
+    ui.originalRenderTrip();
+    const geography = ui.element("dayGeography");
+    assert.equal(geography.hidden, false);
+    assert.ok(elementText(geography).includes(`База дня: ${day.base_area}`));
+    assert.ok(elementText(geography).includes(`Перемещения: ${day.transfer_note}`));
+    assert.ok(!elementText(geography).includes("Переезд:"));
+  }
+  assert.equal(JSON.stringify(ui.state.trip), before, "rendering must not change stored bases or transport notes");
+});
+
 test("real city rendering labels only zero-price visits and discloses the unchanged preliminary total", () => {
   const ui = browser();
   ui.state.trip = detailTrip();

@@ -139,15 +139,16 @@ class PdfExportTests(unittest.TestCase):
         self.assertNotIn(FREE_DAY_NOTE, output)
 
     @unittest.skipIf(PdfReader is None, "Run with the bundled Python runtime for PDF extraction checks")
-    def test_region_bases_and_transfers_survive_pdf_export(self):
+    def test_source_backed_region_bases_and_transfers_survive_pdf_export(self):
         trip = sample_trip()
         trip["request"]["destination_kind"] = "region"
+        trip["itinerary"]["source_schedule"] = True
         trip["itinerary"]["days"][0]["base_area"] = "Хужир"
         trip["itinerary"]["days"][0]["transfer_note"] = "Ориентировочный переезд; сезонность и стоимость уточнить перед поездкой."
         reader = PdfReader(io.BytesIO(build_trip_pdf(trip, [])))
         text = "\n".join(page.extract_text() for page in reader.pages)
         self.assertIn("База дня: Хужир", text)
-        self.assertIn("Переезд (ориентировочно)", text)
+        self.assertIn("Перемещения:", text)
         self.assertIn("сезонность и стоимость уточнить", text)
 
     def test_all_trip_budget_includes_every_part(self):
