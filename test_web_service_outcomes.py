@@ -1,6 +1,7 @@
 """Offline regressions for rejected, committed and unrenderable web operations."""
 
 import asyncio
+import json
 from contextlib import ExitStack
 from types import SimpleNamespace
 import socket
@@ -137,6 +138,45 @@ class WebServiceOutcomeTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "Storage unavailable"):
             web_service.create_trip(123, self.request)
         self.detail.assert_not_called()
+        self.assert_finished(False)
+
+    def test_provider_format_exhaustion_is_validation_without_storage_or_raw_exception(self):
+        self.generate.side_effect=web_service.PlannerFormatError('REJECTED_PRIVATE_MODEL_STRING')
+        with self.assertRaises(web_service.TripCreateValidationError) as raised:
+            web_service.create_trip(123,self.request)
+        self.assertEqual(raised.exception.code,'provider_format')
+        self.assertEqual(raised.exception.diagnostic_problems,['provider_response_schema_invalid'])
+        self.assertNotIn('REJECTED_PRIVATE',str(raised.exception))
+        self.save.assert_not_called();self.detail.assert_not_called()
+        self.assert_finished(False)
+
+    def test_unrelated_planner_runtime_error_is_not_relabelled_as_provider_format(self):
+        self.generate.side_effect=RuntimeError('ordinary internal error')
+        with self.assertRaisesRegex(RuntimeError,'ordinary internal error'):
+            web_service.create_trip(123,self.request)
+        self.save.assert_not_called()
+        self.assert_finished(False)
+
+    def test_two_real_planner_enum_failures_become_web_validation_without_saving(self):
+        import planner
+        import test_grounded_planner as grounded
+        import test_regional_generation_repair as regional
+        request=regional._request()
+        self.mock(web_service,'_normalized_trip_request',return_value=request)
+        source=grounded._source()
+        bad=json.loads(grounded._wire_response_json(source))
+        bad['day_4']['attractions'][0]['place_query']='REJECTED_PRIVATE_MODEL_STRING'
+        completion,_,map_verify=grounded.GroundedPlannerTests()._context(self.stack,[
+            json.dumps(grounded._batch(source)),json.dumps(bad),json.dumps(bad)])
+        self.generate.side_effect=lambda normalized,**kwargs:planner.generate_itinerary(
+            normalized,max_attempts=3,ground_candidates=True)
+        with self.assertRaises(web_service.TripCreateValidationError) as raised:
+            web_service.create_trip(123,request)
+        self.assertEqual(raised.exception.code,'provider_format')
+        self.assertNotIn('REJECTED_PRIVATE',str(raised.exception))
+        self.assertEqual(completion.call_count,3)
+        map_verify.assert_not_called()
+        self.save.assert_not_called();self.detail.assert_not_called()
         self.assert_finished(False)
 
     def test_creation_detail_failure_does_not_delete_saved_trip(self):

@@ -47,6 +47,7 @@ MESSAGES = {
     "limit": "Дневной лимит исчерпан. Эта заявка не запустила новую генерацию.",
     "access": "Доступ завершён, отозван или исчерпан лимит приглашения. Следующие платные обращения остановлены; уже отправленный запрос мог быть оплачен.",
     "provider": "Сервис генерации не завершил операцию. Автоматического повторного платного запуска нет; проверьте список поездок.",
+    "provider_format": "ИИ не смог корректно оформить маршрут. Новая поездка не сохранена; повторная генерация автоматически не запускается.",
     "internal": "Не удалось подтвердить завершение операции. Автоматического повторного запуска нет; проверьте список поездок.",
     "deleted": "Ранее созданная поездка удалена. Повторная генерация не запускалась.",
 }
@@ -258,7 +259,7 @@ class GenerationJobs:
             except web_service.TripCreateValidationError as error:
                 code = getattr(error, "code", "validation")
                 self._finish(job_id, "failed", code if code in {
-                    "insufficient_data", "search_limit", "invalid_request", "validation_error", "unsupported_preferences",
+                    "insufficient_data", "search_limit", "invalid_request", "validation_error", "provider_format", "unsupported_preferences",
                     *web_service.CITY_PREFLIGHT_CODES,
                 } else "validation", getattr(error, "destination_options", ()), getattr(error, "destination_details", ()))
             except web_service.AIDailyLimitError:

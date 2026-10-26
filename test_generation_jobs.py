@@ -269,7 +269,7 @@ class GenerationJobsTests(unittest.TestCase):
         self.assertEqual(jobs.get_job(1, self.account, key=self.key)["status"], "failed")
 
     def test_failure_messages_are_allowlisted_including_insufficient_data(self):
-        for code in ("insufficient_data", "search_limit", "invalid_request", "validation_error", "unsupported_preferences",
+        for code in ("insufficient_data", "search_limit", "invalid_request", "validation_error", "provider_format", "unsupported_preferences",
                      "city_ambiguous", "city_not_found", "city_unavailable", "city_invalid", "private-secret"):
             with self.subTest(code=code):
                 key = str(uuid4())
@@ -281,6 +281,45 @@ class GenerationJobsTests(unittest.TestCase):
                 self.assertEqual(status["status"], "failed")
                 self.assertEqual(status["message"], jobs.MESSAGES[code if code in jobs.MESSAGES else "validation"])
                 self.assertNotIn("secret", json.dumps(status))
+
+    def test_provider_format_has_safe_specific_http_status_without_repeat_or_saved_trip(self):
+        self.worker.side_effect=web_service.TripCreateValidationError(
+            'private-raw-model-output',code='provider_format',diagnostic_problems=['private-prompt'],
+            destination_options=['private-destination'])
+        receipt=self.submit()
+        self.manager.executor.run_next()
+        row=self.rows('generation_jobs')[0]
+        self.assertEqual((row['status'],row['failure_code'],row['trip_id']),('failed','provider_format',None))
+        self.assertNotIn('private',json.dumps(row))
+        client=TestClient(web_app.app)  # No lifespan, only disposable DB/worker.
+        self.addCleanup(client.close)
+        session,csrf,_=web_auth.create_session(1)
+        client.cookies.set(web_auth.SESSION_COOKIE,session)
+        client.cookies.set(web_auth.CSRF_COOKIE,csrf)
+        for path in (f"/api/generation-jobs/{receipt['job_id']}",f'/api/generation-jobs?key={self.key}'):
+            response=client.get(path)
+            self.assertEqual(response.status_code,200,response.text)
+            status=response.json()
+            self.assertEqual(set(status),{'job_id','status','trip_id','message'})
+            self.assertEqual(status['message'],jobs.MESSAGES['provider_format'])
+            self.assertIn('корректно оформить',status['message'])
+            self.assertIn('не сохранена',status['message'])
+            self.assertIn('автоматически не запускается',status['message'])
+            self.assertIsNone(status['trip_id'])
+            self.assertNotIn('private',response.text)
+            self.assertEqual(client.get(path).json(),status)
+        self.assertEqual(self.submit(),status)
+        self.worker.assert_called_once()
+        self.assertEqual(self.manager.executor.calls,[])
+        self.assertEqual(self.rows('trips'),[])
+        self.claim.assert_not_called()
+
+    def test_existing_generic_failures_are_not_reclassified_as_provider_format(self):
+        for code in ('validation','internal'):
+            row={'job_id':str(uuid4()),'status':'failed','failure_code':code,'trip_id':None}
+            before=dict(row)
+            self.assertEqual(jobs.public_status(row)['message'],jobs.MESSAGES[code])
+            self.assertEqual(row,before)
 
     def test_actual_city_preflight_failure_persists_options_without_quota_or_memory(self):
         options = ("Москва, Москва, Россия", "Москва, Тверская область, Россия")

@@ -31,6 +31,7 @@ from pricing import minimum_meal_cost
 from program_coverage import limited_program_problems, program_report_text
 from planner import (
     CITY_SCHEDULE_EDIT_UNAVAILABLE,
+    PlannerFormatError,
     edit_itinerary,
     generate_itinerary,
     paid_interest_cost_warning,
@@ -281,7 +282,7 @@ class TripCreateValidationError(ValueError):
     def __init__(self, message: str, *, diagnostic_problems: Optional[List[str]] = None,
                  code: str = "validation", destination_options=(), destination_details=()) -> None:
         self.diagnostic_problems = list(diagnostic_problems or [])
-        self.code = code if code in {"insufficient_data", "search_limit", "invalid_request", "validation_error",
+        self.code = code if code in {"insufficient_data", "search_limit", "invalid_request", "validation_error", "provider_format",
                                     "unsupported_preferences", *CITY_PREFLIGHT_CODES} else "validation"
         self.destination_options = (safe_city_suggestions(destination_options)
                                     if self.code == "city_ambiguous" else ())
@@ -1077,6 +1078,12 @@ def create_trip(tg_id: int, request: TripRequest, *, expected_account_key: Optio
                 **({"city_candidates_first": True}
                    if normalized.destination_kind == "city" and city_candidates_enabled() else {}),
             )
+        except PlannerFormatError:
+            raise TripCreateValidationError(
+                "Сервис генерации не смог корректно оформить маршрут. Новая поездка не сохранена.",
+                diagnostic_problems=["provider_response_schema_invalid"],
+                code="provider_format",
+            ) from None
         except CityResolutionError as error:
             raise TripCreateValidationError(
                 f"{error} Новая поездка не сохранена."

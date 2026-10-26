@@ -252,3 +252,49 @@ def decode_grounded_response(raw: str, wire_schema: dict) -> str:
     result = ({**{key: payload[key] for key in props if key in _FULL_FIELDS}, "days": list(days.values())}
               if full else days)
     return json.dumps(result, ensure_ascii=False, allow_nan=False)
+
+
+def grounded_query_feedback(raw: str, wire_schema: dict, grounding) -> list[dict]:
+    """Retry data for one unambiguous verified title; never rewrite a reply.
+
+    No alias inference or enum relaxation. Rejected model strings never enter
+    the result. Both full responses and scoped day_N repairs are supported.
+    """
+    if not isinstance(raw, str) or len(raw) > 262144 or not isinstance(wire_schema, dict):
+        return []
+    from grounded_schedule import _pool
+    try:
+        payload = json.loads(raw, object_pairs_hook=_unique_object, parse_constant=_reject_constant)
+        if not isinstance(payload, dict):
+            return []
+        _, candidates = _pool(grounding)
+        by_title = {}
+        for candidate in candidates:
+            by_title.setdefault(candidate['title'], []).append(candidate)
+        corrections = []
+        for key, schema in wire_schema.get('properties', {}).items():
+            if not _DAY_KEY.fullmatch(key):
+                continue
+            day = payload.get(key)
+            if not isinstance(day, dict) or not isinstance(day.get('attractions'), list):
+                continue
+            allowed = schema['properties']['attractions']['items']['properties']['place_query'].get('enum')
+            if not isinstance(allowed, list):
+                continue
+            for index, item in enumerate(day['attractions'][:5]):
+                if not isinstance(item, dict) or not isinstance(item.get('title'), str):
+                    continue
+                if item.get('place_query') in allowed:
+                    continue
+                matches = by_title.get(item['title'], [])
+                if len(matches) != 1 or matches[0]['place_query'] not in allowed:
+                    continue
+                candidate = matches[0]
+                corrections.append({'response_path': f'{key}.attractions[{index}].place_query',
+                                    'confirmed_title': candidate['title'],
+                                    'allowed_place_query': candidate['place_query']})
+                if len(corrections) == 4:
+                    return corrections
+        return corrections
+    except (ValueError, TypeError, KeyError, AttributeError, RecursionError):
+        return []

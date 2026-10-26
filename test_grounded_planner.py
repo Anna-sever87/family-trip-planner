@@ -324,6 +324,33 @@ class GroundedPlannerTests(unittest.TestCase):
         self.assertEqual(generate.call_count, 3)
         verify.assert_not_called()
 
+    def test_invalid_query_retry_gets_exact_known_choice_without_relaxing_schema(self):
+        source=_source()
+        bad=json.loads(_wire_response_json(source))
+        bad['day_4']['attractions'][0]['place_query']='REJECTED_PRIVATE_MODEL_STRING'
+        with ExitStack() as stack:
+            generate,_,verify=self._context(stack,[json.dumps(_batch(source)),json.dumps(bad),_wire_response_json(source)])
+            result=planner.generate_itinerary(regional._request(),max_attempts=3,ground_candidates=True)
+        self.assertEqual((generate.call_count,result.problems),(3,[]))
+        feedback=generate.call_args_list[2].args[0][-1]['content']
+        self.assertIn('CANONICAL_QUERY_CORRECTIONS',feedback)
+        self.assertIn('day_4.attractions[0].place_query',feedback)
+        self.assertIn(regional._attraction(source.days[3]).place_query,feedback)
+        self.assertNotIn('REJECTED_PRIVATE',feedback)
+        self.assertEqual(generate.call_args_list[1].kwargs['json_schema'],generate.call_args_list[2].kwargs['json_schema'])
+        verify.assert_called_once()
+
+    def test_repeated_enum_failure_is_typed_and_never_calls_a_fourth_time(self):
+        source=_source();bad=json.loads(_wire_response_json(source))
+        bad['day_4']['attractions'][0]['place_query']='REJECTED_PRIVATE_MODEL_STRING'
+        with ExitStack() as stack:
+            generate,_,verify=self._context(stack,[json.dumps(_batch(source)),json.dumps(bad),json.dumps(bad)])
+            with self.assertRaises(planner.PlannerFormatError) as raised:
+                planner.generate_itinerary(regional._request(),max_attempts=3,ground_candidates=True)
+        self.assertEqual(generate.call_count,3)
+        self.assertNotIn('REJECTED_PRIVATE',str(raised.exception))
+        verify.assert_not_called()
+
     def test_malformed_wire_repair_keeps_rejected_source_and_never_calls_a_fourth_time(self):
         source = _source()
         regional._attraction(source.days[1]).duration_min = 90
