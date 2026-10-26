@@ -5,9 +5,11 @@ from contextlib import ExitStack
 import hashlib
 import hmac
 import json
+from io import BytesIO
 from pathlib import Path
 import tempfile
 import threading
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 from uuid import uuid4
@@ -25,7 +27,7 @@ with patch("dotenv.load_dotenv", return_value=False):
     import yandex_art
 from fastapi.testclient import TestClient
 import httpx
-from schemas import TripRequest
+from schemas import Itinerary, ItineraryDay, TripRequest
 
 
 class DeferredExecutor:
@@ -318,6 +320,51 @@ class AccessIntegrationTests(unittest.TestCase):
         manager.start()
         self.addCleanup(manager.close)
         return manager
+
+    def test_guest_five_covers_then_cached_views_visibility_and_route_edit_do_not_spend_more_images(self):
+        from PIL import Image
+        output=BytesIO()
+        Image.new('RGB',(16,9),'blue').save(output,format='PNG')
+        image=yandex_art.validate_image(output.getvalue())
+        self.images.side_effect=None
+        self.images.return_value=yandex_art.ArtOperation('local-synthetic-cover',True,image)
+        itinerary=Itinerary(title='Synthetic',summary='',days=[
+            ItineraryDay(day=1,date=self.request.start_date,theme='Synthetic',items=[])])
+        self.assertTrue(db.update_trip_plan(self.trip,self.GUEST,self.request.model_dump(),itinerary.model_dump(),
+                                           expected_revision=1))
+        manager=self.cover_manager()
+        trips=[self.trip]+[db.save_trip(self.GUEST,self.request.model_dump(),itinerary.model_dump()) for _ in range(4)]
+        for trip in trips:
+            self.assertEqual(manager.submit(self.GUEST,self.account,trip)['status'],'queued')
+            manager.executor.run_next()
+            self.assertEqual(manager.get_status(self.GUEST,self.account,trip)['status'],'ready')
+        self.assertEqual(self.rows('access_grants')[0]['cover_used'],5)
+        self.assertEqual(self.rows('access_grants')[0]['route_used'],0)
+        attempts=self.rows('cover_attempts')
+        cover_rows=self.rows('trip_covers')
+        grants=self.rows('access_grants')
+        client=self.client(self.GUEST)
+        url=f'/api/trips/{self.trip}/cover'
+        with patch.object(trip_covers,'manager',manager):
+            for _ in range(3):
+                self.assertEqual(client.get(url).json()['status'],'ready')
+                self.assertEqual(client.get(url+'/image').status_code,200)
+                self.assertEqual(client.post(url).json()['status'],'ready')
+                self.assertEqual(client.patch(url,json={'hidden':True}).status_code,200)
+                self.assertEqual(client.patch(url,json={'hidden':False}).status_code,200)
+        self.assertEqual(self.rows('cover_attempts'),attempts)
+        self.assertEqual(self.rows('access_grants'),grants)
+        result=SimpleNamespace(itinerary=itinerary,problems=[],weather=[],weather_text='',
+                               attempts=1,prompt_tokens=1,completion_tokens=1)
+        with patch.object(web_service,'edit_itinerary',return_value=result), \
+             patch.object(web_service,'get_trip_detail',return_value={'id':self.trip}):
+            self.assertEqual(web_service.edit_trip_day(self.GUEST,self.trip,1,'Уточнить программу')['id'],self.trip)
+        row=self.rows('access_grants')[0]
+        self.assertEqual((row['route_used'],row['cover_used'],row['memory_used']),(1,5,0))
+        self.assertEqual(self.rows('cover_attempts'),attempts)
+        self.assertEqual(self.rows('trip_covers'),cover_rows)
+        self.assertEqual(self.images.call_count,5)
+        self.http.assert_not_called()
 
     def test_cover_queued_then_revoked_does_not_call_provider_and_releases_slots(self):
         manager = self.cover_manager()

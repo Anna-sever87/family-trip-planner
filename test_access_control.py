@@ -354,10 +354,10 @@ class AccessControlTests(unittest.TestCase):
             self.assertEqual(sum(workers.map(reserve, range(20))), 3)
         self.assertEqual(len(self.rows("access_route_attempts")), 3)
 
-    def test_auxiliary_limits_are_independent_and_three_for_entire_grant(self):
+    def test_auxiliary_limits_are_five_covers_and_three_memories_for_entire_grant(self):
         self.join()
-        for kind in ("cover", "memory"):
-            for offset in range(3):
+        for kind, limit in (("cover", 5), ("memory", 3)):
+            for offset in range(limit):
                 access.reserve_aux(self.GUEST, kind, self.now + timedelta(days=offset))
             with self.assertRaises(access.AccessQuotaError):
                 access.reserve_aux(self.GUEST, kind, self.now)
@@ -381,7 +381,7 @@ class AccessControlTests(unittest.TestCase):
         with self.assertRaises(access.AccessDeniedError):
             access.reserve_aux(self.GUEST, "memory", self.now)
 
-    def test_concurrent_aux_reservations_never_exceed_three(self):
+    def test_concurrent_aux_reservations_never_exceed_five_covers(self):
         self.join()
         def reserve(_):
             try:
@@ -390,8 +390,45 @@ class AccessControlTests(unittest.TestCase):
             except access.AccessQuotaError:
                 return False
         with ThreadPoolExecutor(max_workers=8) as workers:
-            self.assertEqual(sum(workers.map(reserve, range(20))), 3)
-        self.assertEqual(self.rows("access_grants")[0]["cover_used"], 3)
+            self.assertEqual(sum(workers.map(reserve, range(20))), 5)
+        self.assertEqual(self.rows("access_grants")[0]["cover_used"], 5)
+
+    def test_five_route_and_five_cover_attempts_are_independent_lifetime_budgets(self):
+        self.join(invite=self.invite(route_limit=5,max_users=1))
+        for _ in range(5):
+            self.spend()
+        with self.assertRaises(access.AccessQuotaError):
+            self.claim()
+        for _ in range(5):
+            access.reserve_aux(self.GUEST,"cover",self.now)
+        with self.assertRaises(access.AccessQuotaError):
+            access.reserve_aux(self.GUEST,"cover",self.now)
+        row=self.rows("access_grants")[0]
+        self.assertEqual((row['route_used'],row['cover_used'],row['memory_used']),(5,5,0))
+        access.reserve_aux(self.GUEST,"memory",self.now)
+        self.assertEqual(self.rows("access_grants")[0]['memory_used'],1)
+        self.assertEqual(len(self.rows("access_route_attempts")),5)
+
+    def test_redeeming_same_link_preserves_cover_usage_and_new_personal_link_resets_only_new_grant(self):
+        invitation=self.invite(route_limit=5,max_users=1)
+        original=self.join(invite=invitation)
+        for _ in range(5):
+            access.reserve_aux(self.GUEST,"cover",self.now)
+        repeated=self.join(invite=invitation)
+        self.assertEqual(repeated['grant_id'],original['grant_id'])
+        with self.assertRaises(access.AccessQuotaError):
+            access.reserve_aux(self.GUEST,"cover",self.now)
+        access.revoke_invite(self.OWNER,invitation['invite_id'],now=self.now)
+        renewed=self.join(invite=self.invite(route_limit=5,max_users=1))
+        self.assertNotEqual(renewed['grant_id'],original['grant_id'])
+        for _ in range(5):
+            access.reserve_aux(self.GUEST,"cover",self.now)
+        with self.assertRaises(access.AccessQuotaError):
+            access.reserve_aux(self.GUEST,"cover",self.now)
+        rows={row['grant_id']:row for row in self.rows('access_grants')}
+        self.assertEqual(rows[original['grant_id']]['cover_used'],5)
+        self.assertEqual(rows[renewed['grant_id']]['cover_used'],5)
+        self.assertEqual(rows[renewed['grant_id']]['route_used'],0)
 
     def test_read_status_and_require_access_never_consume_budgets(self):
         self.join()

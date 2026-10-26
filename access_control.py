@@ -422,7 +422,7 @@ def reserve_route(conn: sqlite3.Connection, tg_id: int, claim_id: str,
 
 
 def reserve_aux(tg_id: int, kind: str, now: datetime | None = None) -> None:
-    """Reserve one cover or memory attempt, independently: three each per grant."""
+    """Reserve independently per grant: five covers or three memory attempts."""
     _user_id(tg_id)
     if kind not in {"cover", "memory"}:
         raise ValueError("Неизвестный тип дополнительной операции.")
@@ -432,13 +432,14 @@ def reserve_aux(tg_id: int, kind: str, now: datetime | None = None) -> None:
         return
     current = _now(now)
     column = {"cover": "cover_used", "memory": "memory_used"}[kind]
+    limit = 5 if kind == "cover" else 3
     with db.connect() as conn:
         conn.execute("BEGIN IMMEDIATE")
         grant = _grant(conn, _subject(conn, tg_id), current)
         if grant is None:
             raise AccessDeniedError()
         _assert_expected_grant(tg_id, grant["grant_id"])
-        if grant[column] >= 3:
+        if grant[column] >= limit:
             label = "обложек" if kind == "cover" else "операций памяти"
             raise AccessQuotaError(f"Лимит {label} по приглашению исчерпан.")
         conn.execute(f"UPDATE access_grants SET {column} = {column} + 1 WHERE grant_id = ?", (grant["grant_id"],))
