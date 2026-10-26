@@ -6,7 +6,7 @@ The attempt ledger contains no account/trip/prompt and survives account deletion
 """
 
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 import hashlib
 import logging
 import os
@@ -100,6 +100,31 @@ def daily_limit():
     raw = os.getenv("IMAGE_GENERATION_DAILY_LIMIT", "10").strip()
     # Invalid or excessively high configuration fails closed.
     return int(raw) if raw.isdecimal() and len(raw) <= 2 and 1 <= int(raw) <= 50 else 0
+
+
+def daily_limit_for(tg_id, day):
+    """Apply a dated operator compensation only to a configured owner.
+
+    The anonymous attempt ledger is preserved. This is a bounded allowance,
+    not a claim that individual historical attempts can be owner-attributed.
+    Guests retain the ordinary global cap; invalid configuration grants none.
+    """
+    base = daily_limit()
+    if base == 0 or not access_control.is_owner(tg_id):
+        return base
+    raw = os.getenv("OWNER_IMAGE_DAILY_COMPENSATION", "")
+    if not isinstance(raw, str) or len(raw) > 13 or not raw.isascii():
+        return base
+    match = re.fullmatch(r"([0-9]{4}-[0-9]{2}-[0-9]{2}):(0|[1-9][0-9]?)", raw)
+    if match is None or not isinstance(day, str) or match[1] != day:
+        return base
+    try:
+        if date.fromisoformat(day).isoformat() != day:
+            return base
+    except ValueError:
+        return base
+    bonus = int(match[2])
+    return base + bonus if bonus <= 40 and base + bonus <= 50 else base
 
 
 def init_schema():
@@ -473,7 +498,7 @@ class TripCovers:
                         raise CoverBusyError(MESSAGES["busy"])
                     today = datetime.now(timezone.utc).date().isoformat()
                     used = conn.execute("SELECT COUNT(*) FROM cover_attempts WHERE utc_day=?", (today,)).fetchone()[0]
-                    if used >= daily_limit():
+                    if used >= daily_limit_for(tg_id, today):
                         raise CoverLimitError(MESSAGES["limit"])
                     acquired = self.slots.acquire(blocking=False)
                     if not acquired:
